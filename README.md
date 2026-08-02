@@ -3,8 +3,12 @@
 基于 [QQ Official Hub](https://github.com/204343414/astrbot_plugin_qqofficial_hub)
 的一次性卡片，全程由按钮点击驱动。支持**人机对战**与**群友对战**。
 
-> 依赖：先安装并启用 `astrbot_plugin_qqofficial_hub`，且开启其
+> 依赖：先安装并启用 `astrbot_plugin_qqofficial_hub` **v0.9.0 以上**，且开启其
 > 「Interaction 兼容桥」并完整重启 AstrBot。
+>
+> 若提示「未找到 / 未启用 / 版本过旧」，可打开 Hub 的 **运行诊断** 页核对：
+> 本插件注册成功时，会在「已注册 Action」里以 `astrbot_plugin_tictactoe`
+> 分组出现并标注「外部插件」。
 
 ## 玩法
 

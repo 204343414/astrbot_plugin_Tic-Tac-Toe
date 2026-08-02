@@ -74,9 +74,31 @@ class TicTacToePlugin(Star):
         if self._hub is not None:
             return self._hub
         star = self.context.get_registered_star(HUB_NAME)
-        hub = getattr(star, "star_cls_obj", None) if star else None
-        if hub is None and not quiet:
-            logger.error("[TicTacToe] QQ Official Hub 未安装或未启用")
+        if star is None:
+            if not quiet:
+                logger.error("[TicTacToe] 未找到插件 %s，请确认已安装并启用", HUB_NAME)
+            return None
+        if not getattr(star, "activated", True):
+            if not quiet:
+                logger.error("[TicTacToe] 插件 %s 已安装但未启用", HUB_NAME)
+            return None
+        # StarMetadata.star_cls is the plugin *instance* (star_cls_type is the
+        # class). There is no `star_cls_obj` -- guessing that name is what made
+        # this report "Hub not installed" on a perfectly good install.
+        hub = getattr(star, "star_cls", None)
+        if hub is None:
+            if not quiet:
+                logger.error("[TicTacToe] %s 尚未完成初始化", HUB_NAME)
+            return None
+        missing = [name for name in ("send_ephemeral_card", "actions")
+                   if not hasattr(hub, name)]
+        if missing:
+            if not quiet:
+                logger.error(
+                    "[TicTacToe] %s 版本过旧，缺少 %s，请升级到 v0.9.0 以上",
+                    HUB_NAME, "、".join(missing),
+                )
+            return None
         self._hub = hub
         return hub
 
