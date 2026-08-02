@@ -125,12 +125,12 @@ def build_card(state: dict[str, Any]) -> dict[str, Any]:
     """
     board = state["board"]
     over = is_over(board)
-    lines = [
-        "# 井字棋",
-        render_board_text(board),
-        "",
-        status_text(state),
-    ]
+    # The grid lives in the buttons, so repeating it as text only adds noise.
+    # Keep a single status line; on the final card show the board once, since
+    # the buttons are gone by then.
+    lines = ["# 井字棋", status_text(state)]
+    if over:
+        lines.insert(1, render_board_text(board))
 
     rows: list[list[dict[str, Any]]] = []
     if not over:
@@ -241,6 +241,24 @@ def apply_move(state: dict[str, Any], cell: int, actor_openid: str) -> str:
     board[cell] = turn
     state["turn"] = AI if turn == HUMAN else HUMAN
     return ""
+
+
+def autoplay_forced_move(state: dict[str, Any]) -> int:
+    """Play the last remaining square automatically.
+
+    With one cell left there is no decision to make, so asking for a tap only
+    costs another card. Returns the cell played, or -1.
+    """
+    board = state["board"]
+    if is_over(board):
+        return -1
+    free = free_cells(board)
+    if len(free) != 1:
+        return -1
+    cell = free[0]
+    board[cell] = state["turn"]
+    state["turn"] = AI if state["turn"] == HUMAN else HUMAN
+    return cell
 
 
 def maybe_ai_move(state: dict[str, Any], rng: random.Random | None = None) -> int:

@@ -28,6 +28,7 @@ from .game import (
     MODE_AI,
     MODE_PVP,
     apply_move,
+    autoplay_forced_move,
     build_card,
     is_over,
     maybe_ai_move,
@@ -192,6 +193,9 @@ class TicTacToePlugin(Star):
 
         if not is_over(state["board"]):
             maybe_ai_move(state)
+        # A single remaining square has no decision in it; play it rather than
+        # spending another card asking for the inevitable tap.
+        autoplay_forced_move(state)
 
         await self._send_board(context, state)
         if is_over(state["board"]):
@@ -262,6 +266,7 @@ class TicTacToePlugin(Star):
 
         if not is_over(state["board"]):
             maybe_ai_move(state)
+        autoplay_forced_move(state)
 
         hub = self._get_hub()
         if hub is None:

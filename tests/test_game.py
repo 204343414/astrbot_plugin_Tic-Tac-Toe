@@ -8,8 +8,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from game import (  # noqa: E402
-    AI, HUMAN, MODE_AI, MODE_PVP, ai_move, apply_move, build_card, is_full,
-    is_over, maybe_ai_move, new_state, render_board_text, winner,
+    AI, HUMAN, MODE_AI, MODE_PVP, ai_move, apply_move, autoplay_forced_move,
+    build_card, is_full, is_over, maybe_ai_move, new_state, render_board_text,
+    winner,
 )
 
 
@@ -283,3 +284,52 @@ def test_grid_disappears_only_when_the_game_ends():
     state["board"] = board_from("OOO|...|...")
     ids = [b["id"] for r in build_card(state)["rows"] for b in r]
     assert ids == ["quit"], "终局只留控制按钮"
+
+
+# --- terser card / fewer messages -------------------------------------------
+
+def test_running_card_has_no_ascii_board_in_the_body():
+    """The grid is on the buttons; repeating it as text is noise."""
+    state = new_state(MODE_AI, "A")
+    apply_move(state, 0, "A")
+    maybe_ai_move(state)
+    body = build_card(state)["markdown"]
+    # "·" only ever appears in the rendered grid; the ⭕ here is the status line.
+    assert "·" not in body, "对局中不应重复渲染棋盘"
+    assert body.splitlines() == ["# 井字棋", "轮到你落子 ⭕"]
+
+
+def test_final_card_shows_the_board_since_buttons_are_gone():
+    state = new_state(MODE_AI, "A")
+    state["board"] = board_from("OOO|...|...")
+    body = build_card(state)["markdown"]
+    assert "⭕" in body, "终局无按钮，正文需保留棋盘"
+    assert "你赢了" in body
+
+
+def test_last_free_cell_is_played_automatically():
+    state = new_state(MODE_PVP, "A")
+    state["board"] = board_from("OXO|XOX|XO.")
+    state["turn"] = AI
+    assert autoplay_forced_move(state) == 8
+    assert is_full(state["board"])
+
+
+def test_autoplay_does_nothing_with_two_cells_left():
+    state = new_state(MODE_PVP, "A")
+    state["board"] = board_from("OXO|XOX|X..")
+    assert autoplay_forced_move(state) == -1
+
+
+def test_autoplay_does_nothing_once_won():
+    state = new_state(MODE_AI, "A")
+    state["board"] = board_from("OOO|XX.|XXO")
+    assert autoplay_forced_move(state) == -1
+
+
+def test_autoplay_respects_whose_turn_it_is():
+    state = new_state(MODE_PVP, "A")
+    state["board"] = board_from("OXO|XOX|XO.")
+    state["turn"] = HUMAN
+    autoplay_forced_move(state)
+    assert state["board"][8] == HUMAN
