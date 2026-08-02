@@ -4,7 +4,7 @@ desc: "QQ 官方机器人井字棋：群友对战或与 AI 对战，全部由卡
 version: "0.1.0"
 author: "204343414"
 astrbot_version: ">=4.26.7"
-repo: "https://github.com/204343414/astrbot_plugin_tictactoe"
+repo: "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe"
 support_platforms:
   - "qq_official"
   - "qq_official_webhook"

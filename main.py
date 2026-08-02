@@ -44,7 +44,7 @@ OWNER = PLUGIN_NAME
     "204343414",
     "QQ 官方机器人井字棋：群友对战或与 AI 对战，全部由卡片按钮驱动。",
     "0.1.0",
-    "https://github.com/204343414/astrbot_plugin_tictactoe",
+    "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
