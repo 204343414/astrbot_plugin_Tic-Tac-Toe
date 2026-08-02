@@ -205,6 +205,7 @@ class TicTacToePlugin(Star):
     # --- actions ------------------------------------------------------------
 
     async def _act_lobby(self, context, params) -> int:
+        await self._retire(context.origin)
         await self._send_card(context, build_lobby_card(self._level(context.origin)))
         return 0
 
@@ -397,6 +398,10 @@ class TicTacToePlugin(Star):
             yield event.plain_result("需要先安装并启用 QQ Official Hub 插件。")
             return
 
+        # A previous match may still hold a session. Retire it first: otherwise
+        # its later cleanup calls end_ephemeral_session and takes the freshly
+        # sent lobby card down with it.
+        await self._retire(origin)
         try:
             await hub.send_ephemeral_card(
                 origin,

@@ -138,3 +138,36 @@ def test_hub_module_helper_rejects_the_first_segment_shortcut():
     source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
     assert 'split(".")[0]' not in source, "取第一段会得到 data，导致 ModuleNotFoundError"
     assert 'rsplit(".", 1)[0]' in source, "应剥离末尾模块名保留完整包路径"
+
+
+def test_lobby_does_not_inherit_a_previous_match_session():
+    """Retiring an old match must not take a freshly sent lobby card with it.
+
+    end_ephemeral_session() deletes *every* card of a session. If the lobby
+    reuses the finished match's session id, cleanup kills it and the very next
+    click reports "卡片不存在或已过期".
+    """
+    import game
+    board = ep.bind_initiator(
+        ep.validate_card(game.build_card(game.new_state(game.MODE_AI, "U1"))), "U1"
+    )
+    lobby = ep.bind_initiator(ep.validate_card(game.build_lobby_card()), "U1")
+    # Distinct sessions are what makes cleanup safe.
+    record_a = ep.build_record(ORIGIN, board, "session-old")
+    record_b = ep.build_record(ORIGIN, lobby, "session-new")
+    assert record_a["session_id"] != record_b["session_id"]
+
+
+def test_command_entry_retires_stale_match_before_sending():
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    entry = source[source.index("async def start_from_command"):]
+    assert "_retire(origin)" in entry.split("send_ephemeral_card")[0], (
+        "开大厅前应先退掉残留对局"
+    )
+
+
+def test_lobby_action_also_retires_first():
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    action = source[source.index("async def _act_lobby"):]
+    action = action[: action.index("return 0")]
+    assert "_retire" in action
