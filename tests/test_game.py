@@ -8,9 +8,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from game import (  # noqa: E402
-    AI, HUMAN, MODE_AI, MODE_PVP, ai_move, apply_move, autoplay_forced_move,
-    build_card, is_full, is_over, maybe_ai_move, new_state, render_board_text,
-    winner,
+    AI, AI_LEVELS, HUMAN, LEVEL_EASY, LEVEL_LABELS, LEVEL_SLIP, LEVEL_HARD,
+    LEVEL_NORMAL, MODE_AI, MODE_PVP, PHASE_PLAYING, PHASE_WAITING, ai_move,
+    apply_move, autoplay_forced_move, build_card, build_lobby_card,
+    build_waiting_card, is_full, is_over, maybe_ai_move, new_state,
+    render_board_text, winner,
 )
 
 
@@ -333,3 +335,66 @@ def test_autoplay_respects_whose_turn_it_is():
     state["turn"] = HUMAN
     autoplay_forced_move(state)
     assert state["board"][8] == HUMAN
+
+
+# --- lobby / waiting / difficulty -------------------------------------------
+
+def test_lobby_offers_both_modes_and_levels():
+    card = build_lobby_card()
+    labels = [b["label"] for r in card["rows"] for b in r]
+    assert any("人机" in x for x in labels)
+    assert any("群友" in x for x in labels)
+    for name in AI_LEVELS:
+        assert any(LEVEL_LABELS[name] in x for x in labels)
+
+
+def test_lobby_marks_the_current_level():
+    card = build_lobby_card(LEVEL_EASY)
+    marked = [b["label"] for r in card["rows"] for b in r if b["label"].startswith("✅")]
+    assert marked == [f"✅ {LEVEL_LABELS[LEVEL_EASY]}"]
+
+
+def test_lobby_is_open_to_everyone():
+    """Anyone may start a game; only the board itself is turn-locked."""
+    card = build_lobby_card()
+    for row in card["rows"]:
+        for button in row:
+            assert button.get("owner_mode", "everyone") == "everyone"
+
+
+def test_waiting_card_names_the_host_and_offers_join():
+    card = build_waiting_card(new_state(MODE_PVP, "A"), "小明")
+    assert "小明" in card["markdown"]
+    ids = [b["id"] for r in card["rows"] for b in r]
+    assert ids == ["join", "cancel"]
+
+
+def test_pvp_starts_in_waiting_phase():
+    assert new_state(MODE_PVP, "A")["phase"] == PHASE_WAITING
+    assert new_state(MODE_AI, "A")["phase"] == PHASE_PLAYING
+
+
+def test_harder_levels_slip_less_often():
+    assert LEVEL_SLIP[LEVEL_EASY] > LEVEL_SLIP[LEVEL_NORMAL] > LEVEL_SLIP[LEVEL_HARD]
+    assert LEVEL_SLIP[LEVEL_HARD] == 0.0
+
+
+def test_easy_ai_is_actually_beatable():
+    """A perfect opponent is not a game: tic-tac-toe is a solved draw."""
+    rng = random.Random(1)
+    wins = 0
+    for _ in range(400):
+        state = new_state(MODE_AI, "A")
+        state["level"] = LEVEL_EASY
+        while not is_over(state["board"]):
+            free = [i for i, c in enumerate(state["board"]) if not c]
+            apply_move(state, rng.choice(free), "A")
+            maybe_ai_move(state, rng)
+        if winner(state["board"]) == HUMAN:
+            wins += 1
+    assert wins > 40, f"随机玩家在轻松难度下也只赢了 {wins}/400"
+
+
+def test_hard_ai_still_blocks_and_wins():
+    assert ai_move(board_from("XX.|OO.|..."), AI, level=LEVEL_HARD) == 2
+    assert ai_move(board_from("OO.|X..|..."), AI, level=LEVEL_HARD) == 2

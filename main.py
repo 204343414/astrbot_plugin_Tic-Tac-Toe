@@ -24,12 +24,18 @@ from astrbot.api.star import Context, Star, register
 
 from .game import (
     AI,
+    AI_LEVELS,
     HUMAN,
+    LEVEL_LABELS,
+    LEVEL_NORMAL,
     MODE_AI,
     MODE_PVP,
+    PHASE_PLAYING,
     apply_move,
     autoplay_forced_move,
     build_card,
+    build_lobby_card,
+    build_waiting_card,
     is_over,
     maybe_ai_move,
     new_state,
@@ -55,6 +61,7 @@ class TicTacToePlugin(Star):
         # origin -> game state. In-memory on purpose: an unfinished match is
         # not worth persisting across restarts, and the cards expire anyway.
         self._games: dict[str, dict[str, Any]] = {}
+        self._levels: dict[str, str] = {}
         self._hub = None
 
     async def initialize(self) -> None:
@@ -127,8 +134,11 @@ class TicTacToePlugin(Star):
         ActionSpec = self._hub_module(hub, "action_registry").ActionSpec
 
         specs = (
-            ("tictactoe.start_ai", "🎮 井字棋：人机对战", "开始一局与 AI 的井字棋。", self._act_start_ai),
-            ("tictactoe.start_pvp", "🎮 井字棋：群友对战", "开始一局群友对战的井字棋。", self._act_start_pvp),
+            ("tictactoe.lobby", "🎮 井字棋", "打开井字棋大厅卡片，选择对战方式。", self._act_lobby),
+            ("tictactoe.start_ai", "井字棋：人机对战", "由大厅卡片触发。", self._act_start_ai),
+            ("tictactoe.start_pvp", "井字棋：群友对战", "由大厅卡片触发。", self._act_start_pvp),
+            ("tictactoe.set_level", "井字棋：切换难度", "由大厅卡片触发。", self._act_set_level),
+            ("tictactoe.join", "井字棋：加入对战", "由等待卡片触发。", self._act_join),
             ("tictactoe.move", "井字棋落子", "由棋盘按钮触发，请勿手动绑定。", self._act_move),
             ("tictactoe.occupied", "井字棋占位提示", "点到已落子的格子，只回提示不发消息。", self._act_occupied),
             ("tictactoe.quit", "井字棋结束对局", "结束当前群的井字棋对局。", self._act_quit),
@@ -144,6 +154,22 @@ class TicTacToePlugin(Star):
                 callback=callback,
             ))
         logger.info("[TicTacToe] Registered %d Hub actions", len(specs))
+
+    async def _send_card(self, context, card: dict[str, Any],
+                         session_id: str = "") -> str:
+        """Send any card as a passive reply to the click that caused it."""
+        hub = self._get_hub()
+        if hub is None:
+            return ""
+        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
+        return await hub.send_ephemeral_card(
+            context.origin,
+            card,
+            client=context.client,
+            session_id=session_id,
+            event_id=passive_event_id(context.interaction),
+            initiator_openid=context.member_openid,
+        )
 
     async def _send_board(self, context, state: dict[str, Any]) -> None:
         """Send the board as a passive reply to the click that triggered it."""
@@ -164,17 +190,60 @@ class TicTacToePlugin(Star):
 
     # --- actions ------------------------------------------------------------
 
+    async def _act_lobby(self, context, params) -> int:
+        await self._send_card(context, build_lobby_card(self._level(context.origin)))
+        return 0
+
+    async def _act_set_level(self, context, params) -> int:
+        level = str(params.get("level") or "")
+        if level not in AI_LEVELS:
+            return 1
+        self._levels[context.origin] = level
+        await self._send_card(context, build_lobby_card(level))
+        return 0
+
     async def _act_start_ai(self, context, params) -> int:
         return await self._start(context, MODE_AI)
 
     async def _act_start_pvp(self, context, params) -> int:
         return await self._start(context, MODE_PVP)
 
-    async def _start(self, context, mode: str) -> int:
-        state = new_state(mode, context.member_openid)
-        self._games[context.origin] = state
+    async def _act_join(self, context, params) -> int:
+        """Second player takes the ❌ seat."""
+        state = self._games.get(context.origin)
+        if state is None or state.get("phase") == PHASE_PLAYING:
+            return 3
+        host = state["players"].get(HUMAN, "")
+        if context.member_openid == host:
+            return 4  # the host cannot play both seats
+        state["players"][AI] = context.member_openid
+        state["phase"] = PHASE_PLAYING
         await self._send_board(context, state)
         return 0
+
+    def _level(self, origin: str) -> str:
+        return self._levels.get(origin, LEVEL_NORMAL)
+
+    async def _start(self, context, mode: str) -> int:
+        state = new_state(mode, context.member_openid)
+        state["level"] = self._level(context.origin)
+        self._games[context.origin] = state
+        if mode == MODE_PVP:
+            label = await self._label_of(context, context.member_openid)
+            await self._send_card(context, build_waiting_card(state, label))
+            return 0
+        await self._send_board(context, state)
+        return 0
+
+    async def _label_of(self, context, openid: str) -> str:
+        hub = self._get_hub(quiet=True)
+        book = getattr(hub, "identities", None) if hub else None
+        if book is None:
+            return ""
+        try:
+            return await book.label_for(context.origin, openid)
+        except Exception:
+            return ""
 
     async def _act_move(self, context, params) -> int:
         state = self._games.get(context.origin)
@@ -293,7 +362,7 @@ class TicTacToePlugin(Star):
     )
     @filter.command("井字棋", alias={"tictactoe"})
     async def start_from_command(self, event: AstrMessageEvent, mode: str = ""):
-        """/井字棋 [人机|对战]"""
+        """/井字棋 —— 打开大厅卡片，由按钮选择对战方式。"""
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         if "GroupMessage" not in origin:
@@ -304,16 +373,13 @@ class TicTacToePlugin(Star):
             yield event.plain_result("需要先安装并启用 QQ Official Hub 插件。")
             return
 
-        chosen = MODE_PVP if mode.strip() in ("对战", "pvp", "群友") else MODE_AI
-        state = new_state(chosen, str(event.get_sender_id() or ""))
-        self._games[origin] = state
         try:
-            state["session_id"] = await hub.send_ephemeral_card(
+            await hub.send_ephemeral_card(
                 origin,
-                build_card(state),
+                build_lobby_card(self._level(origin)),
                 msg_id=str(event.message_obj.message_id or "") or None,
                 initiator_openid=str(event.get_sender_id() or ""),
             )
         except Exception as exc:
-            logger.exception("[TicTacToe] Failed to send board")
+            logger.exception("[TicTacToe] Failed to send lobby")
             yield event.plain_result(f"发牌失败：{type(exc).__name__}: {exc}")
