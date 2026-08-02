@@ -1,14 +1,59 @@
-# astrbot-plugin-helloworld
+# 井字棋（QQ 官方机器人）
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+基于 [QQ Official Hub](https://github.com/204343414/astrbot_plugin_qqofficial_hub)
+的一次性卡片，全程由按钮点击驱动。支持**人机对战**与**群友对战**。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+> 依赖：先安装并启用 `astrbot_plugin_qqofficial_hub`，且开启其
+> 「Interaction 兼容桥」并完整重启 AstrBot。
 
-# Supports
+## 玩法
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+聊天命令：
+
+```
+/井字棋          # 人机对战
+/井字棋 对战     # 群友对战
+```
+
+或在 Hub 卡片编辑器里，把任意按钮的「点击后执行」设为
+**🎮 井字棋：人机对战 / 群友对战** —— 插件启用后会自动出现在下拉框里。
+
+## 它如何满足 QQ 的限制
+
+| 限制 | 应对 |
+| --- | --- |
+| 群主动消息每月 4 条 | 每次落子都作为**被动回复**发出，不消耗主动配额 |
+| 被动回复 5 分钟 / 5 条 | 一次点击只回一张卡 |
+| 按钮上限 5×5 | 棋盘 3×3 + 1 行控制按钮 = 4 行 |
+| 同时点击 | 每格 `one_shot`，由 Hub 服务端加锁判定，先到先得 |
+| 抢别人的回合 | 格子 `owner_openid` 锁到当前回合方，他人点击返回「现在不是你的回合」 |
+
+## 为什么棋盘不能在编辑器里画
+
+棋盘**每一步都在变**：已落子的格子要消失、归属要换人、终局要换成「再来一局」。
+编辑器保存的是**静态**卡片，无法表达这些。因此棋盘由 `game.build_card()` 每回合
+重新生成 —— 这正是 Hub 一次性卡片存在的意义。
+
+编辑器里能做的是**入口**：把「开始井字棋」绑到你的功能面板按钮上。
+
+## 结构
+
+| 文件 | 职责 |
+| --- | --- |
+| `game.py` | 纯规则、AI、卡片渲染。不依赖 AstrBot，可单独测试 |
+| `main.py` | Hub 对接：注册 Action、发牌、命令入口 |
+
+AI 采用「能赢就赢 → 能堵就堵 → 中心/角 → 随机」的简单策略，不是 minimax，
+但至少不会视而不见地送掉一局。
+
+## 测试
+
+```bash
+python -m pytest tests -q                                   # 纯规则
+PYTHONPATH=/path/to/astrbot_plugin_qqofficial_hub \
+  python -m pytest tests -q                                 # 含 Hub 合约测试
+```
+
+合约测试会用 Hub 的**真实校验器**验证每一步棋盘卡片，并断言归属锁与
+一次性生效。它们是这个插件保持独立的理由：若能纯靠 Hub 公开 API 跑通，
+说明那套机制对狼人杀、宝可梦一类也够用。
