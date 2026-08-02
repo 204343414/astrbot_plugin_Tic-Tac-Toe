@@ -209,3 +209,22 @@ def test_full_ai_game_always_terminates():
         maybe_ai_move(state, rng)
     assert is_over(state["board"])
     build_card(state)  # must still render
+
+
+# --- server-side rules are the source of truth ------------------------------
+
+def test_rules_hold_without_any_button():
+    """A button is only a shortcut; typing /下棋 must be equally safe."""
+    state = new_state(MODE_PVP, "A")
+    assert apply_move(state, 0, "A") == ""
+    # occupied square refused even though no button was involved
+    assert apply_move(state, 0, "B") == "该位置已被占据"
+    # out-of-turn refused
+    apply_move(state, 1, "B")
+    assert apply_move(state, 2, "B") == "现在不是你的回合"
+
+
+def test_refusal_reasons_are_human_readable():
+    state = new_state(MODE_AI, "A")
+    assert apply_move(state, 99, "A") == "位置无效"
+    assert apply_move(state, 0, "B") == "这不是你的对局"

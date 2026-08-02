@@ -189,6 +189,58 @@ class TicTacToePlugin(Star):
         filter.PlatformAdapterType.QQOFFICIAL
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
     )
+    @filter.command("下棋", alias={"落子"})
+    async def move_from_command(self, event: AstrMessageEvent, position: str = ""):
+        """/下棋 1-9 —— 不依赖按钮的落子入口。
+
+        A button is only a shortcut: the rules live on the server, so typing the
+        move must be exactly as safe as tapping it. This also keeps the game
+        playable on clients where the keyboard fails to render.
+        """
+        event.stop_event()
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        state = self._games.get(origin)
+        if state is None:
+            yield event.plain_result("本群当前没有对局，先发送 /井字棋 开始。")
+            return
+
+        raw = str(position or "").strip()
+        if not raw.isdigit() or not 1 <= int(raw) <= 9:
+            yield event.plain_result("位置必须是 1~9，例如 /下棋 5")
+            return
+
+        cell = int(raw) - 1
+        refusal = apply_move(state, cell, str(event.get_sender_id() or ""))
+        if refusal:
+            yield event.plain_result(f"❌ {refusal}")
+            return
+
+        if not is_over(state["board"]):
+            maybe_ai_move(state)
+
+        hub = self._get_hub()
+        if hub is None:
+            yield event.plain_result("QQ Official Hub 未启用，无法刷新棋盘。")
+            return
+        try:
+            state["session_id"] = await hub.send_ephemeral_card(
+                origin,
+                build_card(state),
+                session_id=state.get("session_id", ""),
+                msg_id=str(event.message_obj.message_id or "") or None,
+                initiator_openid=str(event.get_sender_id() or ""),
+            )
+        except Exception as exc:
+            logger.exception("[TicTacToe] Failed to refresh board")
+            yield event.plain_result(f"刷新棋盘失败：{type(exc).__name__}: {exc}")
+            return
+        if is_over(state["board"]):
+            await self._retire(origin)
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
     @filter.command("井字棋", alias={"tictactoe"})
     async def start_from_command(self, event: AstrMessageEvent, mode: str = ""):
         """/井字棋 [人机|对战]"""
