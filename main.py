@@ -157,10 +157,15 @@ class TicTacToePlugin(Star):
 
     async def _send_card(self, context, card: dict[str, Any],
                          session_id: str = "") -> str:
-        """Send any card as a passive reply to the click that caused it."""
+        """Send any card as a passive reply to the click that caused it.
+
+        Raises on failure rather than returning "": a silent empty return made
+        a broken send look like a successful one, and the only symptom was a
+        bare "操作失败" toast with nothing in the log.
+        """
         hub = self._get_hub()
         if hub is None:
-            return ""
+            raise RuntimeError("QQ Official Hub 不可用")
         passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
         return await hub.send_ephemeral_card(
             context.origin,
@@ -205,8 +210,14 @@ class TicTacToePlugin(Star):
     # --- actions ------------------------------------------------------------
 
     async def _act_lobby(self, context, params) -> int:
-        await self._retire(context.origin)
-        await self._send_card(context, build_lobby_card(self._level(context.origin)))
+        try:
+            await self._retire(context.origin)
+            await self._send_card(
+                context, build_lobby_card(self._level(context.origin))
+            )
+        except Exception:
+            logger.exception("[TicTacToe] Failed to open lobby")
+            return 1
         return 0
 
     async def _act_set_level(self, context, params) -> int:
@@ -214,7 +225,11 @@ class TicTacToePlugin(Star):
         if level not in AI_LEVELS:
             return 1
         self._levels[context.origin] = level
-        await self._send_card(context, build_lobby_card(level))
+        try:
+            await self._send_card(context, build_lobby_card(level))
+        except Exception:
+            logger.exception("[TicTacToe] Failed to switch level")
+            return 1
         return 0
 
     async def _act_start_ai(self, context, params) -> int:
