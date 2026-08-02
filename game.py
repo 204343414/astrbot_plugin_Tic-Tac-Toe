@@ -130,19 +130,30 @@ def status_text(state: dict[str, Any]) -> str:
     if win:
         if state["mode"] == MODE_AI:
             return "🎉 你赢了！" if win == HUMAN else "🤖 AI 赢了。"
-        name = state["players"].get(win, "")
-        return f"🎉 {MARKS[win]} 获胜！{_short(name)}"
+        return f"🎉 {MARKS[win]} {player_label(state, win)} 获胜！".replace("  ", " ")
     if is_full(board):
         return "🤝 平局。"
     turn = state["turn"]
     if state["mode"] == MODE_AI:
         return "轮到你落子 ⭕" if turn == HUMAN else "AI 思考中…"
-    holder = state["players"].get(turn, "")
-    return f"轮到 {MARKS[turn]} 落子 {_short(holder)}".rstrip()
+    label = player_label(state, turn)
+    return f"轮到 {MARKS[turn]} {label} 落子".replace("  ", " ").strip()
 
 
-def _short(openid: str) -> str:
-    return f"({openid[-6:]})" if openid else ""
+def player_label(state: dict[str, Any], mark: str) -> str:
+    """Human-readable name for a seat.
+
+    Names are injected by the plugin layer (which can reach the Hub's identity
+    book) into ``state["labels"]``. This module stays free of Hub imports, and
+    never falls back to showing a raw OpenID -- an opaque hex string tells a
+    player nothing and looks broken.
+    """
+    labels = state.get("labels") or {}
+    label = str(labels.get(mark) or "").strip()
+    if label:
+        return label
+    openid = str((state.get("players") or {}).get(mark) or "")
+    return f"玩家…{openid[-4:]}" if openid else ""
 
 
 def build_card(state: dict[str, Any]) -> dict[str, Any]:

@@ -171,12 +171,26 @@ class TicTacToePlugin(Star):
             initiator_openid=context.member_openid,
         )
 
+    async def _refresh_labels(self, context, state: dict[str, Any]) -> None:
+        """Resolve seat OpenIDs to nicknames via the Hub's identity book.
+
+        Done here rather than in game.py so the rules module keeps working
+        without the Hub. Refreshed on every send, so a rename shows up as soon
+        as that player next speaks.
+        """
+        labels = {}
+        for mark, openid in (state.get("players") or {}).items():
+            if openid:
+                labels[mark] = await self._label_of(context, openid)
+        state["labels"] = labels
+
     async def _send_board(self, context, state: dict[str, Any]) -> None:
         """Send the board as a passive reply to the click that triggered it."""
         hub = self._get_hub()
         if hub is None:
             return
         passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
+        await self._refresh_labels(context, state)
 
         session_id = await hub.send_ephemeral_card(
             context.origin,
@@ -341,6 +355,16 @@ class TicTacToePlugin(Star):
         if hub is None:
             yield event.plain_result("QQ Official Hub 未启用，无法刷新棋盘。")
             return
+        # Same label refresh as the button path, so /下棋 renders names too.
+        book = getattr(hub, "identities", None)
+        labels = {}
+        for mark, openid in (state.get("players") or {}).items():
+            if openid and book is not None:
+                try:
+                    labels[mark] = await book.label_for(origin, openid)
+                except Exception:
+                    pass
+        state["labels"] = labels
         try:
             state["session_id"] = await hub.send_ephemeral_card(
                 origin,

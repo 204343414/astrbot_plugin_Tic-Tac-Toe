@@ -12,7 +12,7 @@ from game import (  # noqa: E402
     LEVEL_NORMAL, MODE_AI, MODE_PVP, PHASE_PLAYING, PHASE_WAITING, ai_move,
     apply_move, autoplay_forced_move, build_card, build_lobby_card,
     build_waiting_card, is_full, is_over, maybe_ai_move, new_state,
-    render_board_text, winner,
+    player_label, render_board_text, status_text, winner,
 )
 
 
@@ -398,3 +398,46 @@ def test_easy_ai_is_actually_beatable():
 def test_hard_ai_still_blocks_and_wins():
     assert ai_move(board_from("XX.|OO.|..."), AI, level=LEVEL_HARD) == 2
     assert ai_move(board_from("OO.|X..|..."), AI, level=LEVEL_HARD) == 2
+
+
+# --- never show a raw OpenID ------------------------------------------------
+
+def test_status_never_leaks_a_raw_openid():
+    """An opaque hex id tells a player nothing and looks like a bug."""
+    openid = "15CB6AB7A714145630DF8DEBD0CA9294"
+    state = new_state(MODE_PVP, openid)
+    state["players"][AI] = "2561FB890E2E9EE221A68C42E1718D09"
+    text = status_text(state)
+    assert openid not in text
+    assert openid[-6:] not in text, "连后 6 位也不该直接示人"
+    assert "玩家…" in text, "无昵称时应给出可读占位"
+
+
+def test_status_uses_injected_labels():
+    state = new_state(MODE_PVP, "A1")
+    state["players"][AI] = "B2"
+    state["labels"] = {HUMAN: "小明", AI: "小红"}
+    assert "小明" in status_text(state)
+    state["turn"] = AI
+    assert "小红" in status_text(state)
+
+
+def test_winner_line_uses_the_label():
+    state = new_state(MODE_PVP, "A1")
+    state["players"][AI] = "B2"
+    state["labels"] = {HUMAN: "小明"}
+    state["board"] = board_from("OOO|...|...")
+    assert "小明" in status_text(state) and "获胜" in status_text(state)
+
+
+def test_ai_mode_status_is_unaffected_by_labels():
+    state = new_state(MODE_AI, "A1")
+    state["labels"] = {HUMAN: "小明"}
+    assert status_text(state) == "轮到你落子 ⭕"
+
+
+def test_player_label_prefers_nickname_over_openid():
+    state = new_state(MODE_PVP, "AAAA1111")
+    assert player_label(state, HUMAN).startswith("玩家…")
+    state["labels"] = {HUMAN: "小明"}
+    assert player_label(state, HUMAN) == "小明"
