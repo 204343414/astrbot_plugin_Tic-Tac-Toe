@@ -10,6 +10,19 @@
 > 本插件注册成功时，会在「已注册 Action」里以 `astrbot_plugin_tictactoe`
 > 分组出现并标注「外部插件」。
 
+## 安装
+
+在 AstrBot 插件市场填入仓库地址：
+
+```
+https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe
+```
+
+> ⚠️ 若你在 v0.1.0 之前装过本插件，旧的 `metadata.yaml` 里 `repo` 字段指向了
+> 一个不存在的仓库名，AstrBot 更新时会读**已安装的**那份 metadata
+> （`updator.py`: `repo_url = plugin.repo`），于是永远 404 —— 修复在新版本里，
+> 但要更新才能拿到新版本，形成死锁。请先卸载再按上面的地址重装。
+
 ## 玩法
 
 聊天命令：

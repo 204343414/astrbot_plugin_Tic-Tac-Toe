@@ -114,16 +114,27 @@ def test_hub_module_helper_resolves_from_instance():
     namespace: dict = {"Any": object}
     exec(compile(ast.Module([func], []), "<helper>", "exec"), namespace)
 
-    leaf = types.ModuleType("weird_hub_dir.qqofficial_hub.action_registry")
+    # AstrBot imports plugins as data.plugins.<dir_name>.main, so the package
+    # is three segments deep. Taking split(".")[0] yields a useless "data" and
+    # raises "No module named 'data.qqofficial_hub'".
+    base = "data.plugins.astrbot_plugin_qqofficial_hub-main"
+    leaf = types.ModuleType(f"{base}.qqofficial_hub.action_registry")
     leaf.ActionSpec = object
     sys.modules.update({
-        "weird_hub_dir": types.ModuleType("weird_hub_dir"),
-        "weird_hub_dir.qqofficial_hub": types.ModuleType("weird_hub_dir.qqofficial_hub"),
-        "weird_hub_dir.qqofficial_hub.action_registry": leaf,
+        base: types.ModuleType(base),
+        f"{base}.qqofficial_hub": types.ModuleType(f"{base}.qqofficial_hub"),
+        f"{base}.qqofficial_hub.action_registry": leaf,
     })
 
     class FakeHub:
         pass
 
-    FakeHub.__module__ = "weird_hub_dir.main"
+    FakeHub.__module__ = f"{base}.main"
     assert namespace["_hub_module"](FakeHub(), "action_registry").ActionSpec is object
+
+
+def test_hub_module_helper_rejects_the_first_segment_shortcut():
+    """Guard against regressing to ``__module__.split(".")[0]``."""
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    assert 'split(".")[0]' not in source, "取第一段会得到 data，导致 ModuleNotFoundError"
+    assert 'rsplit(".", 1)[0]' in source, "应剥离末尾模块名保留完整包路径"

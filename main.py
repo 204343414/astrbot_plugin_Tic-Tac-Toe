@@ -106,13 +106,17 @@ class TicTacToePlugin(Star):
     def _hub_module(hub: Any, name: str):
         """Import a Hub submodule without hard-coding its package name.
 
-        The top-level package is the plugin's *directory* name, which differs
-        between a git clone and a downloaded zip (``...-main``). Deriving it
-        from the live Hub instance is the only reliable way.
+        AstrBot imports plugins as ``data.plugins.<dir_name>.main`` (see
+        star_manager: ``path = "data.plugins." + root_dir_name + "." + module_str``).
+        The directory name varies between a git clone and a downloaded zip
+        (``...-main``), so the package must be derived from the live Hub
+        instance -- but by stripping the trailing module, not by taking the
+        first segment, which would yield a useless ``data``.
         """
         import importlib
 
-        package = type(hub).__module__.split(".")[0]
+        module_name = type(hub).__module__          # data.plugins.<dir>.main
+        package = module_name.rsplit(".", 1)[0]     # data.plugins.<dir>
         return importlib.import_module(f"{package}.qqofficial_hub.{name}")
 
     def _register_actions(self) -> None:
