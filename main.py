@@ -224,13 +224,21 @@ class TicTacToePlugin(Star):
         return await self._start(context, MODE_PVP)
 
     async def _act_join(self, context, params) -> int:
-        """Second player takes the ❌ seat."""
+        """Second player takes the ❌ seat.
+
+        The seat is guarded here rather than by a one-shot button: the Hub
+        consumes a one-shot click before the game runs, so a stray tap by the
+        host would lock everyone else out permanently.
+        """
         state = self._games.get(context.origin)
-        if state is None or state.get("phase") == PHASE_PLAYING:
+        if state is None:
             return 3
+        if state.get("phase") == PHASE_PLAYING:
+            return 3  # already started; the ❌ seat is taken
         host = state["players"].get(HUMAN, "")
         if context.member_openid == host:
-            return 4  # the host cannot play both seats
+            # Toast only, and the card stays usable for a real opponent.
+            return 4
         state["players"][AI] = context.member_openid
         state["phase"] = PHASE_PLAYING
         await self._send_board(context, state)
@@ -296,15 +304,21 @@ class TicTacToePlugin(Star):
         return 3  # duplicate/已使用
 
     async def _act_quit(self, context, params) -> int:
-        state = self._games.get(context.origin)
-        if state is None:
+        """End the current match. Idempotent: a second tap is a no-op toast."""
+        if self._games.get(context.origin) is None:
             return 3
         await self._retire(context.origin)
         return 0
 
     async def _act_restart(self, context, params) -> int:
+        """Start a fresh match in the same mode.
+
+        Retire first so the previous session's cleanup cannot take the new
+        card down with it.
+        """
         previous = self._games.get(context.origin)
         mode = previous["mode"] if previous else MODE_AI
+        await self._retire(context.origin)
         return await self._start(context, mode)
 
     async def _retire(self, origin: str) -> None:

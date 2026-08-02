@@ -207,13 +207,21 @@ def build_card(state: dict[str, Any]) -> dict[str, Any]:
                 })
             rows.append(buttons)
 
+    # Control buttons are not one_shot either: a one-shot click is consumed by
+    # the Hub before the game runs, so a single stray tap would leave nobody
+    # able to end or restart the match. Idempotence is handled in the handlers.
+    seats = [openid for openid in (state.get("players") or {}).values() if openid]
     rows.append([{
         "id": "quit",
         "label": "🔚 结束对局" if not over else "🔄 再来一局",
         "style": 0,
         "action_id": "tictactoe.quit" if not over else "tictactoe.restart",
         "params": {},
-        "one_shot": True,
+        "one_shot": False,
+        # While a match is running only its players may end it; once it is over
+        # anyone may start the next one.
+        "owner_mode": "specified" if (not over and len(seats) == 1) else "everyone",
+        "owner_openid": seats[0] if (not over and len(seats) == 1) else "",
     }])
 
     return {
@@ -273,6 +281,7 @@ def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
 def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str, Any]:
     """Shown after "群友对战": one seat taken, waiting for an opponent."""
     host = host_label or "发起者"
+    host_openid = str((state.get("players") or {}).get(HUMAN) or "")
     return {
         "id": "tictactoe_waiting",
         "markdown": "\n".join([
@@ -282,10 +291,17 @@ def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str,
             "点击「加入对战」成为 ❌ 方。",
         ]),
         "rows": [[
+            # NOT one_shot: the Hub consumes a one-shot button *before* the
+            # game sees the click, so the host tapping it once would burn the
+            # seat for everyone. Whether the seat is taken is game state, not
+            # button state.
             {"id": "join", "label": "🙋 加入对战", "style": 1,
-             "action_id": "tictactoe.join", "params": {}, "one_shot": True},
+             "action_id": "tictactoe.join", "params": {}, "one_shot": False},
+            # Only the host may cancel their own pending match.
             {"id": "cancel", "label": "🔚 取消", "style": 0,
-             "action_id": "tictactoe.quit", "params": {}, "one_shot": True},
+             "action_id": "tictactoe.quit", "params": {}, "one_shot": False,
+             "owner_mode": "specified" if host_openid else "everyone",
+             "owner_openid": host_openid},
         ]],
         "one_shot": False,
         "ttl_seconds": 1800,

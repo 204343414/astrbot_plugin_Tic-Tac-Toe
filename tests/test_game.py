@@ -64,22 +64,23 @@ def test_ai_game_rejects_a_stranger():
 # --- AI ---------------------------------------------------------------------
 
 def test_ai_takes_the_win():
+    # Pin the level: lower difficulties intentionally play random moves.
     board = board_from("XX.|OO.|...")
-    assert ai_move(board, AI) == 2
+    assert ai_move(board, AI, level=LEVEL_HARD) == 2
 
 
 def test_ai_blocks_an_immediate_loss():
     board = board_from("OO.|X..|...")
-    assert ai_move(board, AI) == 2, "must block rather than wander off"
+    assert ai_move(board, AI, level=LEVEL_HARD) == 2, "must block rather than wander off"
 
 
 def test_ai_prefers_winning_over_blocking():
     board = board_from("XX.|OO.|...")
-    assert ai_move(board, AI) == 2
+    assert ai_move(board, AI, level=LEVEL_HARD) == 2
 
 
 def test_ai_takes_centre_when_free():
-    assert ai_move(board_from("X..|...|..."), AI) == 4
+    assert ai_move(board_from("X..|...|..."), AI, level=LEVEL_HARD) == 4
 
 
 def test_ai_never_picks_an_occupied_cell():
@@ -441,3 +442,60 @@ def test_player_label_prefers_nickname_over_openid():
     assert player_label(state, HUMAN).startswith("玩家…")
     state["labels"] = {HUMAN: "小明"}
     assert player_label(state, HUMAN) == "小明"
+
+
+# --- one_shot must never gate a shared seat ---------------------------------
+
+def test_join_button_is_not_one_shot():
+    """The Hub consumes a one-shot click *before* the game sees it.
+
+    So the host tapping 加入对战 once would burn the seat and lock out every
+    real opponent. Seat occupancy is game state, not button state.
+    """
+    card = build_waiting_card(new_state(MODE_PVP, "HOST"), "房主")
+    join = next(b for b in card["rows"][0] if b["id"] == "join")
+    assert join["one_shot"] is False
+    assert join.get("owner_mode", "everyone") == "everyone", "任何人都该能加入"
+
+
+def test_only_the_host_may_cancel_a_pending_match():
+    card = build_waiting_card(new_state(MODE_PVP, "HOST"), "房主")
+    cancel = next(b for b in card["rows"][0] if b["id"] == "cancel")
+    assert cancel["owner_openid"] == "HOST"
+    assert cancel["one_shot"] is False
+
+
+def test_control_buttons_are_never_one_shot():
+    """A stray tap must not leave the match impossible to end or restart."""
+    for state in (
+        new_state(MODE_AI, "HOST"),
+        new_state(MODE_PVP, "HOST"),
+    ):
+        control = [b for r in build_card(state)["rows"] for b in r
+                   if b["id"] == "quit"]
+        assert control and control[0]["one_shot"] is False
+
+
+def test_running_solo_match_can_only_be_ended_by_its_player():
+    state = new_state(MODE_AI, "HOST")
+    quit_button = next(b for r in build_card(state)["rows"] for b in r
+                       if b["id"] == "quit")
+    assert quit_button["owner_openid"] == "HOST", "路人不应能结束别人的对局"
+
+
+def test_finished_match_can_be_restarted_by_anyone():
+    state = new_state(MODE_AI, "HOST")
+    state["board"] = board_from("OOO|...|...")
+    button = next(b for r in build_card(state)["rows"] for b in r)
+    assert button["action_id"] == "tictactoe.restart"
+    assert button.get("owner_mode", "everyone") == "everyone"
+    assert button["one_shot"] is False
+
+
+def test_only_playable_cells_stay_one_shot():
+    """Cells *should* be one-shot: replaying a square is genuinely invalid."""
+    state = new_state(MODE_AI, "HOST")
+    for row in build_card(state)["rows"]:
+        for button in row:
+            if button["action_id"] == "tictactoe.move":
+                assert button["one_shot"] is True
