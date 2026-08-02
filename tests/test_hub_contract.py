@@ -83,3 +83,47 @@ def test_button_data_does_not_leak_the_move():
         for button in row["buttons"]:
             assert "cell\":" not in button["action"]["data"]
             assert button["action"]["type"] == 1
+
+
+def test_hub_module_path_is_derived_not_hard_coded():
+    """The Hub's top-level package name is its *directory* name, which differs
+    between a git clone and a downloaded zip (``...-main``). Hard-coding it
+    raises ModuleNotFoundError on perfectly good installs."""
+    import re
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    hard_coded = re.findall(
+        r"^\s*from\s+astrbot_plugin_qqofficial_hub[\w.]*\s+import", source, re.M
+    )
+    assert not hard_coded, f"不得硬编码 Hub 包名: {hard_coded}"
+    assert "_hub_module" in source, "应通过 _hub_module 从实例推导包名"
+
+
+def test_hub_module_helper_resolves_from_instance():
+    """Extract the helper without importing main.py, which needs AstrBot."""
+    import ast
+    import sys
+    import types
+
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    tree = ast.parse(source)
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_hub_module"
+    )
+    func.decorator_list = []
+    namespace: dict = {"Any": object}
+    exec(compile(ast.Module([func], []), "<helper>", "exec"), namespace)
+
+    leaf = types.ModuleType("weird_hub_dir.qqofficial_hub.action_registry")
+    leaf.ActionSpec = object
+    sys.modules.update({
+        "weird_hub_dir": types.ModuleType("weird_hub_dir"),
+        "weird_hub_dir.qqofficial_hub": types.ModuleType("weird_hub_dir.qqofficial_hub"),
+        "weird_hub_dir.qqofficial_hub.action_registry": leaf,
+    })
+
+    class FakeHub:
+        pass
+
+    FakeHub.__module__ = "weird_hub_dir.main"
+    assert namespace["_hub_module"](FakeHub(), "action_registry").ActionSpec is object

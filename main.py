@@ -102,13 +102,24 @@ class TicTacToePlugin(Star):
         self._hub = hub
         return hub
 
+    @staticmethod
+    def _hub_module(hub: Any, name: str):
+        """Import a Hub submodule without hard-coding its package name.
+
+        The top-level package is the plugin's *directory* name, which differs
+        between a git clone and a downloaded zip (``...-main``). Deriving it
+        from the live Hub instance is the only reliable way.
+        """
+        import importlib
+
+        package = type(hub).__module__.split(".")[0]
+        return importlib.import_module(f"{package}.qqofficial_hub.{name}")
+
     def _register_actions(self) -> None:
         hub = self._get_hub()
         if hub is None:
             return
-        from astrbot_plugin_qqofficial_hub.qqofficial_hub.action_registry import (
-            ActionSpec,
-        )
+        ActionSpec = self._hub_module(hub, "action_registry").ActionSpec
 
         specs = (
             ("tictactoe.start_ai", "🎮 井字棋：人机对战", "开始一局与 AI 的井字棋。", self._act_start_ai),
@@ -133,9 +144,7 @@ class TicTacToePlugin(Star):
         hub = self._get_hub()
         if hub is None:
             return
-        from astrbot_plugin_qqofficial_hub.qqofficial_hub.passive_reply import (
-            passive_event_id,
-        )
+        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
 
         session_id = await hub.send_ephemeral_card(
             context.origin,
