@@ -140,6 +140,21 @@ def build_card(state: dict[str, Any]) -> dict[str, Any]:
             for col in range(3):
                 index = row * 3 + col
                 if board[index]:
+                    # Keep the 3x3 grid intact. An occupied square stays as a
+                    # button showing its mark; clicking it is answered with an
+                    # ACK code only, which QQ shows as a toast to the clicker
+                    # and costs no group message at all.
+                    buttons.append({
+                        "id": f"cell{index}",
+                        "label": MARKS[board[index]],
+                        "style": 0,
+                        "action_id": "tictactoe.occupied",
+                        "params": {"cell": index},
+                        "one_shot": False,
+                        "owner_mode": "everyone",
+                        "owner_openid": "",
+                        "unsupport_tips": "该位置已被占据",
+                    })
                     continue
                 buttons.append({
                     "id": f"cell{index}",
@@ -151,8 +166,7 @@ def build_card(state: dict[str, Any]) -> dict[str, Any]:
                     "owner_mode": "specified" if owner else "everyone",
                     "owner_openid": owner,
                 })
-            if buttons:
-                rows.append(buttons)
+            rows.append(buttons)
 
     rows.append([{
         "id": "quit",

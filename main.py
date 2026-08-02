@@ -129,6 +129,7 @@ class TicTacToePlugin(Star):
             ("tictactoe.start_ai", "🎮 井字棋：人机对战", "开始一局与 AI 的井字棋。", self._act_start_ai),
             ("tictactoe.start_pvp", "🎮 井字棋：群友对战", "开始一局群友对战的井字棋。", self._act_start_pvp),
             ("tictactoe.move", "井字棋落子", "由棋盘按钮触发，请勿手动绑定。", self._act_move),
+            ("tictactoe.occupied", "井字棋占位提示", "点到已落子的格子，只回提示不发消息。", self._act_occupied),
             ("tictactoe.quit", "井字棋结束对局", "结束当前群的井字棋对局。", self._act_quit),
             ("tictactoe.restart", "井字棋再来一局", "以相同模式重新开局。", self._act_restart),
         )
@@ -196,6 +197,15 @@ class TicTacToePlugin(Star):
         if is_over(state["board"]):
             await self._retire(context.origin)
         return 0
+
+    async def _act_occupied(self, context, params) -> int:
+        """A click on an already-played square.
+
+        Returning an ACK code makes QQ show a toast to that one user and sends
+        **no group message**, so a misclick costs nothing -- neither the passive
+        reply budget nor everyone else's attention.
+        """
+        return 3  # duplicate/已使用
 
     async def _act_quit(self, context, params) -> int:
         state = self._games.get(context.origin)

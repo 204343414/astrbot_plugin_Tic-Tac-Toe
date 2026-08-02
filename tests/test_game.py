@@ -128,27 +128,30 @@ def test_host_cannot_take_both_seats():
 
 # --- card rendering ---------------------------------------------------------
 
-def test_card_only_offers_free_cells():
+def test_only_free_cells_are_playable():
+    """Occupied squares remain on the grid but are no longer playable."""
     state = new_state(MODE_AI, "A")
     state["board"] = board_from("OX.|...|...")
-    ids = {b["id"] for row in build_card(state)["rows"] for b in row}
-    assert "cell0" not in ids and "cell1" not in ids
-    assert "cell2" in ids and "cell8" in ids
+    by_id = {b["id"]: b for row in build_card(state)["rows"] for b in row}
+    assert by_id["cell0"]["action_id"] == "tictactoe.occupied"
+    assert by_id["cell1"]["action_id"] == "tictactoe.occupied"
+    assert by_id["cell2"]["action_id"] == "tictactoe.move"
+    assert by_id["cell8"]["action_id"] == "tictactoe.move"
 
 
 def test_every_cell_button_is_one_shot():
     state = new_state(MODE_AI, "A")
     for row in build_card(state)["rows"]:
         for button in row:
-            if button["id"].startswith("cell"):
+            if button["action_id"] == "tictactoe.move":
                 assert button["one_shot"] is True, "a square must not be replayable"
 
 
 def test_cells_are_locked_to_the_player_whose_turn_it_is():
     state = new_state(MODE_AI, "A")
     cells = [b for row in build_card(state)["rows"] for b in row
-             if b["id"].startswith("cell")]
-    assert all(b["owner_openid"] == "A" for b in cells)
+             if b["action_id"] == "tictactoe.move"]
+    assert cells and all(b["owner_openid"] == "A" for b in cells)
     assert all(b["owner_mode"] == "specified" for b in cells)
 
 
@@ -157,8 +160,8 @@ def test_pvp_lock_follows_the_turn():
     apply_move(state, 0, "A")
     state["players"][AI] = "B"
     cells = [b for row in build_card(state)["rows"] for b in row
-             if b["id"].startswith("cell")]
-    assert all(b["owner_openid"] == "B" for b in cells)
+             if b["action_id"] == "tictactoe.move"]
+    assert cells and all(b["owner_openid"] == "B" for b in cells)
 
 
 def test_open_seat_lets_anyone_click():
@@ -166,8 +169,8 @@ def test_open_seat_lets_anyone_click():
     state = new_state(MODE_PVP, "A")
     apply_move(state, 0, "A")          # now it is X's turn, seat still empty
     cells = [b for row in build_card(state)["rows"] for b in row
-             if b["id"].startswith("cell")]
-    assert all(b["owner_mode"] == "everyone" for b in cells)
+             if b["action_id"] == "tictactoe.move"]
+    assert cells and all(b["owner_mode"] == "everyone" for b in cells)
 
 
 def test_finished_game_shows_restart_and_no_cells():
@@ -228,3 +231,55 @@ def test_refusal_reasons_are_human_readable():
     state = new_state(MODE_AI, "A")
     assert apply_move(state, 99, "A") == "位置无效"
     assert apply_move(state, 0, "B") == "这不是你的对局"
+
+
+# --- 3x3 grid stability -----------------------------------------------------
+
+def test_board_is_always_a_full_3x3_grid():
+    """A shrinking grid makes players mis-tap. Occupied squares stay in place."""
+    state = new_state(MODE_AI, "A")
+    for played in range(9):
+        if is_over(state["board"]):
+            break
+        grid = [r for r in build_card(state)["rows"]
+                if all(b["id"].startswith("cell") for b in r)]
+        assert len(grid) == 3, f"落子 {played} 手后行数应为 3"
+        assert all(len(r) == 3 for r in grid), f"落子 {played} 手后每行应为 3"
+        free = [i for i, c in enumerate(state["board"]) if not c]
+        apply_move(state, free[0], "A")
+        maybe_ai_move(state)
+
+
+def test_cells_keep_their_position_index():
+    """cell4 must always be the centre, whatever has been played."""
+    state = new_state(MODE_AI, "A")
+    apply_move(state, 0, "A")
+    grid = [b for r in build_card(state)["rows"] for b in r
+            if b["id"].startswith("cell")]
+    assert [b["id"] for b in grid] == [f"cell{i}" for i in range(9)]
+
+
+def test_occupied_squares_show_the_mark_and_a_no_op_action():
+    state = new_state(MODE_AI, "A")
+    apply_move(state, 0, "A")
+    button = next(b for r in build_card(state)["rows"] for b in r
+                  if b["id"] == "cell0")
+    assert button["label"] == "⭕", "已落子的格子应显示棋子"
+    assert button["action_id"] == "tictactoe.occupied"
+    assert button["one_shot"] is False, "占位按钮不该被消费"
+    assert button["owner_mode"] == "everyone", "任何人误点都只得到提示"
+
+
+def test_free_squares_still_show_their_number():
+    state = new_state(MODE_AI, "A")
+    button = next(b for r in build_card(state)["rows"] for b in r
+                  if b["id"] == "cell4")
+    assert button["label"] == "5"
+    assert button["action_id"] == "tictactoe.move"
+
+
+def test_grid_disappears_only_when_the_game_ends():
+    state = new_state(MODE_AI, "A")
+    state["board"] = board_from("OOO|...|...")
+    ids = [b["id"] for r in build_card(state)["rows"] for b in r]
+    assert ids == ["quit"], "终局只留控制按钮"
