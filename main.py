@@ -62,7 +62,6 @@ class TicTacToePlugin(Star):
         self.config = config or {}
         # origin -> game state. In-memory on purpose: an unfinished match is
         # not worth persisting across restarts, and the cards expire anyway.
-        self._games: dict[str, dict[str, Any]] = {}
         self._levels: dict[str, str] = {}
         # Gomoku boards are pictures, so they need their own registry: one
         # match per group, an idle deadline, and avatars cached per match.
@@ -83,7 +82,6 @@ class TicTacToePlugin(Star):
                 hub.actions.unregister_owner(OWNER)
             except Exception:
                 logger.warning("[TicTacToe] Failed to unregister actions")
-        self._games.clear()
 
     # --- Hub plumbing -------------------------------------------------------
 
@@ -256,7 +254,7 @@ class TicTacToePlugin(Star):
         consumes a one-shot click before the game runs, so a stray tap by the
         host would lock everyone else out permanently.
         """
-        state = self._games.get(context.origin)
+        state = self._matches.get(context.origin)
         if state is None:
             return 3
         if state.get("phase") == PHASE_PLAYING:
@@ -274,9 +272,16 @@ class TicTacToePlugin(Star):
         return self._levels.get(origin, LEVEL_NORMAL)
 
     async def _start(self, context, mode: str) -> int:
+        # One match per group across *all* games: boards are noisy and a second
+        # match would make "which board am I replying to?" ambiguous.
+        busy = self._matches.busy_reason(context.origin)
+        if busy:
+            logger.info("[Games] %s", busy)
+            return 2
         state = new_state(mode, context.member_openid)
         state["level"] = self._level(context.origin)
-        self._games[context.origin] = state
+        state["display_name"] = "井字棋"
+        self._matches.start(context.origin, state)
         if mode == MODE_PVP:
             label = await self._label_of(context, context.member_openid)
             await self._send_card(context, build_waiting_card(state, label))
@@ -295,7 +300,7 @@ class TicTacToePlugin(Star):
             return ""
 
     async def _act_move(self, context, params) -> int:
-        state = self._games.get(context.origin)
+        state = self._matches.get(context.origin)
         if state is None:
             logger.info("[TicTacToe] Move without an active game in %s", context.origin)
             return 3  # duplicate/expired
@@ -331,7 +336,7 @@ class TicTacToePlugin(Star):
 
     async def _act_quit(self, context, params) -> int:
         """End the current match. Idempotent: a second tap is a no-op toast."""
-        if self._games.get(context.origin) is None:
+        if self._matches.get(context.origin) is None:
             return 3
         await self._retire(context.origin)
         return 0
@@ -342,7 +347,7 @@ class TicTacToePlugin(Star):
         Retire first so the previous session's cleanup cannot take the new
         card down with it.
         """
-        previous = self._games.get(context.origin)
+        previous = self._matches.get(context.origin)
         mode = previous["mode"] if previous else MODE_AI
         await self._retire(context.origin)
         return await self._start(context, mode)
@@ -445,7 +450,7 @@ class TicTacToePlugin(Star):
         self._matches.touch(state)
 
     async def _retire(self, origin: str) -> None:
-        state = self._games.pop(origin, None)
+        state = self._matches.pop(origin)
         hub = self._get_hub(quiet=True)
         if state and hub is not None and state.get("session_id"):
             try:
@@ -459,7 +464,9 @@ class TicTacToePlugin(Star):
         filter.PlatformAdapterType.QQOFFICIAL
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
     )
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=80)
+    # Higher than the Hub's catch-all panel hint (priority=100): a quoted
+    # coordinate is a move, and the Hub must not swallow it first.
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=200)
     async def gomoku_move_by_quote(self, event: AstrMessageEvent):
         """Play by quoting the board image and replying with a coordinate.
 
@@ -565,7 +572,7 @@ class TicTacToePlugin(Star):
         """
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
-        state = self._games.get(origin)
+        state = self._matches.get(origin)
         if state is None:
             yield event.plain_result("本群当前没有对局，先发送 /井字棋 开始。")
             return

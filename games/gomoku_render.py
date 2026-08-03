@@ -50,8 +50,17 @@ _FONT_HINTS = (
 
 
 def _can_render_cjk(font) -> bool:
+    """True only when the font really has the glyph.
+
+    Measuring the bounding box is not enough: a font without CJK coverage still
+    draws a "tofu" box with a non-zero size. Comparing the rendered bitmap
+    against a private-use codepoint (which can never have a glyph) tells the
+    two apart -- that is why boards came out full of squares.
+    """
     try:
-        return font.getbbox(_CJK_PROBE)[2] > 0
+        glyph = bytes(font.getmask(_CJK_PROBE))
+        missing = bytes(font.getmask("\ue000"))
+        return bool(glyph) and glyph != missing
     except Exception:
         return False
 
@@ -89,6 +98,7 @@ def _font(size: int):
     cached = _FONT_CACHE.get(size)
     if cached is not None:
         return cached
+    _FONT_CACHE["cjk"] = True
     for path in _discover_font_paths():
         try:
             font = ImageFont.truetype(path, size)
@@ -97,9 +107,28 @@ def _font(size: int):
         if _can_render_cjk(font):
             _FONT_CACHE[size] = font
             return font
+    # No CJK font anywhere: fall back to any real font and let the caller
+    # switch to ASCII-only text, which beats a wall of tofu boxes.
+    for path in _discover_font_paths():
+        try:
+            font = ImageFont.truetype(path, size)
+        except Exception:
+            continue
+        _FONT_CACHE[size] = font
+        _FONT_CACHE["cjk"] = False
+        return font
     fallback = ImageFont.load_default()
     _FONT_CACHE[size] = fallback
+    _FONT_CACHE["cjk"] = False
     return fallback
+
+
+def has_cjk_font() -> bool:
+    """Whether the chosen font can draw Chinese; drives ASCII fallback text."""
+    if "cjk" not in _FONT_CACHE:
+        _font(20)
+        _FONT_CACHE.setdefault("cjk", True)
+    return bool(_FONT_CACHE.get("cjk", True))
 
 
 def _circle_avatar(data: bytes, size: int) -> Image.Image | None:
@@ -115,11 +144,25 @@ def _circle_avatar(data: bytes, size: int) -> Image.Image | None:
     return avatar
 
 
+def _ascii_only(text: str) -> str:
+    """Strip characters the current font cannot draw."""
+    return "".join(ch for ch in text if ord(ch) < 128).strip()
+
+
+def _fit(text: str) -> str:
+    return text if has_cjk_font() else _ascii_only(text)
+
+
 def render_board(
     state: dict[str, Any],
     avatars: dict[str, bytes] | None = None,
 ) -> bytes:
-    """Draw the board and return PNG bytes."""
+    """Draw the board and return PNG bytes.
+
+    The move hint is drawn *inside* the picture: QQ shows an image message with
+    little room for a caption, and players need the instruction next to the
+    board they are about to quote.
+    """
     avatars = avatars or {}
     image = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(image)
@@ -142,14 +185,15 @@ def render_board(
             x, y = left + col * CELL, top + row * CELL
             draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=LINE)
 
+    # Labels only along the top and left edges: repeating them on all four
+    # sides just adds visual noise on a phone screen.
     for i in range(g.SIZE):
-        letter = g.COLUMN_LETTERS[i]
         x = left + i * CELL
-        draw.text((x, top - 26), letter, font=font_small, fill=TEXT, anchor="mm")
-        draw.text((x, top + BOARD_PX + 24), letter, font=font_small, fill=TEXT, anchor="mm")
+        draw.text((x, top - 26), g.COLUMN_LETTERS[i],
+                  font=font_small, fill=TEXT, anchor="mm")
         y = top + i * CELL
-        draw.text((left - 28, y), str(i + 1), font=font_small, fill=TEXT, anchor="mm")
-        draw.text((left + BOARD_PX + 28, y), str(i + 1), font=font_small, fill=TEXT, anchor="mm")
+        draw.text((left - 28, y), str(i + 1),
+                  font=font_small, fill=TEXT, anchor="mm")
 
     radius = CELL // 2 - 2
     win_line = set(g.winning_line(state["board"]))
@@ -169,6 +213,13 @@ def render_board(
             dot = 4
             marker = WHITE_STONE if mark == g.BLACK else BLACK_STONE
             draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=marker)
+
+    hint = g.move_hint(state)
+    if hint and not has_cjk_font():
+        hint = "Quote this image and reply e.g. H8"
+    if hint:
+        draw.text((WIDTH // 2, HEIGHT - MARGIN // 2 - 4), hint,
+                  font=_font(19), fill=TEXT, anchor="mm")
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
@@ -194,9 +245,12 @@ def _draw_players(image, draw, state, avatars, font_name, font_status) -> None:
             draw.ellipse((x - 4, y - 4, x + size + 4, y + size + 4),
                          outline=HIGHLIGHT, width=3)
         label = g.player_label(state, mark) or ("AI" if state["mode"] == g.MODE_AI else "待加入")
-        side = "黑" if mark == g.BLACK else "白"
+        side = ("黑" if mark == g.BLACK else "白") if has_cjk_font() else (
+            "B" if mark == g.BLACK else "W"
+        )
         anchor_x = x + size // 2
-        draw.text((anchor_x, y + size + 14), f"{side} {label}"[:14],
+        name = _fit(str(label)) or ("AI" if state["mode"] == g.MODE_AI else "?")
+        draw.text((anchor_x, y + size + 14), f"{side} {name}"[:14],
                   font=font_name, fill=TEXT, anchor="mm")
 
     # Emoji fonts are frequently absent on servers, so the in-image status uses
@@ -206,7 +260,7 @@ def _draw_players(image, draw, state, avatars, font_name, font_status) -> None:
         status = status.replace(emoji, word)
     for emoji in ("🎉", "🤝", "🤖"):
         status = status.replace(emoji, "")
-    draw.text((WIDTH // 2, HEADER // 2), status.strip(),
+    draw.text((WIDTH // 2, HEADER // 2), _fit(status.strip()) or "Gomoku",
               font=font_status, fill=TEXT, anchor="mm")
 
 

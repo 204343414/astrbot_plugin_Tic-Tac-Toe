@@ -221,3 +221,55 @@ def test_avatar_url_uses_the_qq_app_cdn():
     url = render.avatar_url("102824564", "ABCDEF")
     assert url == "https://thirdqq.qlogo.cn/qqapp/102824564/ABCDEF/640"
     assert render.avatar_url("", "ABCDEF") == ""
+
+
+# --- rendering details the user asked for -----------------------------------
+
+def test_labels_only_on_top_and_left():
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    source = Path(__file__).resolve().parents[1].joinpath(
+        "games/gomoku_render.py").read_text("utf-8")
+    body = source[source.index("for i in range(g.SIZE):"):]
+    body = body[: body.index("radius = ")]
+    assert body.count("draw.text(") == 2, "四边都标注会显得杂乱，只保留上/左"
+    assert "BOARD_PX + 24" not in body and "BOARD_PX + 28" not in body
+
+
+def test_move_hint_is_drawn_inside_the_image():
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    source = Path(__file__).resolve().parents[1].joinpath(
+        "games/gomoku_render.py").read_text("utf-8")
+    assert "hint = g.move_hint(state)" in source, "提示语应画进图片而非正文"
+
+
+def test_tofu_detection_rejects_a_font_without_cjk():
+    """A font lacking CJK still draws a box, so bbox size proves nothing."""
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    from PIL import ImageFont
+    try:
+        dejavu = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    except Exception:
+        pytest.skip("测试环境没有 DejaVu")
+    assert render._can_render_cjk(dejavu) is False, "豆腐块不算能渲染中文"
+
+
+def test_board_degrades_to_ascii_without_a_cjk_font():
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    import os
+    if not os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        pytest.skip("测试环境没有 DejaVu")
+    state = g.new_state(g.MODE_AI, "U1")
+    state["labels"] = {g.BLACK: "无所事事"}
+    original = render._discover_font_paths
+    render._FONT_CACHE.clear()
+    render._discover_font_paths = lambda: [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    ]
+    try:
+        assert render.has_cjk_font() is False
+        assert render.render_board(state).startswith(b"\x89PNG")
+        assert render._fit("无所事事abc") == "abc", "无 CJK 字体时应剔除中文"
+    finally:
+        render._discover_font_paths = original
+        render._FONT_CACHE.clear()
