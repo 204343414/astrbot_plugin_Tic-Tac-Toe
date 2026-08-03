@@ -171,3 +171,67 @@ def test_lobby_action_also_retires_first():
     action = source[source.index("async def _open_lobby"):]
     action = action[: action.index("return 0")]
     assert "_retire" in action
+
+
+# --- one self-replacing card, not a pile ------------------------------------
+#
+# The Hub recalls the card a new one supersedes, but only within the same
+# session. Every _send_card used to open a fresh session, so the lobby, each
+# difficulty re-render and the waiting card all stayed on screen.
+
+def _main_text() -> str:
+    return Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+
+
+def test_every_card_send_rides_a_session():
+    """A send with no session id can never be recalled."""
+    source = _main_text()
+    for call in ("lobby.build_lobby_card(spec, level)",
+                 "ttt.build_waiting_card(state, label)",
+                 "gk.build_waiting_card(state, label)",
+                 "ach.build_waiting_card(state, label)"):
+        window = source[source.index(call): source.index(call) + 260]
+        assert "_ui_session(" in window, f"{call} 未挂到会话上，无法被撤回"
+
+
+def test_the_ui_session_is_per_group_and_per_game():
+    """Opening 五子棋 must not recall a 井字棋 card someone is still reading."""
+    source = _main_text()
+    body = source[source.index("def _ui_session"):]
+    body = body[: body.index("async def _send_card")]
+    assert "spec.key" in body and "origin" in body
+
+
+def test_the_board_joins_the_lobby_session():
+    """So the first board replaces the lobby card instead of stacking on it."""
+    source = _main_text()
+    sender = source[source.index("async def _send_board"):]
+    sender = sender[: sender.index("# --- actions")]
+    assert "_ui_session(context.origin, ttt.SPEC)" in sender
+
+
+def test_game_over_keeps_the_final_card_clickable():
+    """Regression: 「🔄 再来一局」 was a dead button.
+
+    end_ephemeral_session() invalidates every card of the session, so retiring
+    on game over made the final board answer 「卡片不存在或已过期」 -- the one
+    card players are most likely to click.
+    """
+    source = _main_text()
+    retire = source[source.index("async def _retire"):]
+    retire = retire[: retire.index("# --- chat commands")]
+    assert "keep_cards" in retire
+    assert "if keep_cards:\n            return" in retire
+
+    move = source[source.index("async def _act_move"):]
+    move = move[: move.index("async def _act_occupied")]
+    assert "keep_cards=True" in move, "终局应保留卡片，否则再来一局点不动"
+
+
+def test_an_explicit_quit_still_retires_the_cards():
+    """Ending a match on purpose must leave no clickable board behind."""
+    source = _main_text()
+    quit_handler = source[source.index("async def _act_quit"):]
+    quit_handler = quit_handler[: quit_handler.index("async def _act_restart")]
+    assert "_retire(context.origin)" in quit_handler
+    assert "keep_cards" not in quit_handler

@@ -52,7 +52,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.6.0",
+    "0.7.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -192,6 +192,20 @@ class TicTacToePlugin(Star):
             ))
         logger.info("[TicTacToe] Registered %d Hub actions", len(specs))
 
+    def _ui_session(self, origin: str, spec) -> str:
+        """A stable session id for a game's *card* UI in one group.
+
+        The Hub recalls the card a new one supersedes, but only within the same
+        session -- and every send used to open a fresh session, so the lobby,
+        the difficulty re-render and the waiting card all piled up on screen.
+        Keying the session to (group, game) makes the whole entry flow one
+        conversation that replaces itself, which is what it always looked like.
+
+        Deliberately not shared *between* games: opening 五子棋 must not recall
+        the 井字棋 card someone else is still reading.
+        """
+        return f"ui:{spec.key}:{origin}"
+
     async def _send_card(self, context, card: dict[str, Any],
                          session_id: str = "") -> str:
         """Send any card as a passive reply to the click that caused it.
@@ -238,7 +252,8 @@ class TicTacToePlugin(Star):
             context.origin,
             build_card(state),
             client=context.client,
-            session_id=state.get("session_id", ""),
+            session_id=state.get("session_id")
+            or self._ui_session(context.origin, ttt.SPEC),
             event_id=passive_event_id(context.interaction),
             initiator_openid=context.member_openid,
         )
@@ -263,6 +278,7 @@ class TicTacToePlugin(Star):
             await self._send_card(
                 context,
                 lobby.build_lobby_card(spec, self._level(context.origin, spec)),
+                session_id=self._ui_session(context.origin, spec),
             )
         except Exception:
             logger.exception("[Games] Failed to open the %s lobby", spec.key)
@@ -286,7 +302,10 @@ class TicTacToePlugin(Star):
             return 1
         self._levels[(context.origin, spec.key)] = level
         try:
-            await self._send_card(context, lobby.build_lobby_card(spec, level))
+            await self._send_card(
+                context, lobby.build_lobby_card(spec, level),
+                session_id=self._ui_session(context.origin, spec),
+            )
         except Exception:
             logger.exception("[Games] Failed to switch the %s level", spec.key)
             return 1
@@ -335,7 +354,10 @@ class TicTacToePlugin(Star):
         self._matches.start(context.origin, state)
         if mode == MODE_PVP:
             label = await self._label_of(context, context.member_openid)
-            await self._send_card(context, ttt.build_waiting_card(state, label))
+            await self._send_card(
+                    context, ttt.build_waiting_card(state, label),
+                    session_id=self._ui_session(context.origin, ttt.SPEC),
+                )
             return 0
         await self._send_board(context, state)
         return 0
@@ -373,7 +395,8 @@ class TicTacToePlugin(Star):
 
         await self._send_board(context, state)
         if is_over(state["board"]):
-            await self._retire(context.origin)
+            # Keep the final card: it carries 「🔄 再来一局」.
+            await self._retire(context.origin, keep_cards=True)
         return 0
 
     async def _act_occupied(self, context, params) -> int:
@@ -426,7 +449,10 @@ class TicTacToePlugin(Star):
                 # Same two-step as tic-tac-toe: seat the opponent on a card
                 # first, so the board picture is only spent on a real match.
                 label = await self._label_of(context, context.member_openid)
-                await self._send_card(context, gk.build_waiting_card(state, label))
+                await self._send_card(
+                    context, gk.build_waiting_card(state, label),
+                    session_id=self._ui_session(context.origin, gk.SPEC),
+                )
                 return 0
             await self._send_picture_board(context.origin, state,
                                           client=context.client,
@@ -482,7 +508,10 @@ class TicTacToePlugin(Star):
         try:
             if mode == ach.MODE_PVP:
                 label = await self._label_of(context, context.member_openid)
-                await self._send_card(context, ach.build_waiting_card(state, label))
+                await self._send_card(
+                    context, ach.build_waiting_card(state, label),
+                    session_id=self._ui_session(context.origin, ach.SPEC),
+                )
                 return 0
             await self._send_picture_board(context.origin, state,
                                            client=context.client,
@@ -623,9 +652,19 @@ class TicTacToePlugin(Star):
         except Exception:
             logger.debug("[Games] Failed to recall the previous board")
 
-    async def _retire(self, origin: str) -> None:
+    async def _retire(self, origin: str, keep_cards: bool = False) -> None:
+        """Drop the match. ``keep_cards`` leaves the last card clickable.
+
+        end_ephemeral_session() invalidates *every* card of the session, so
+        calling it when a game ends turned the final board's 「🔄 再来一局」
+        into a dead button answering 「卡片不存在或已过期」. At game over the
+        match is gone but the card must survive; only an explicit quit -- or
+        making room for a new game -- retires the cards too.
+        """
         state = self._matches.pop(origin)
         self._avatars.pop(origin, None)
+        if keep_cards:
+            return
         hub = self._get_hub(quiet=True)
         if state and hub is not None and state.get("session_id"):
             try:
@@ -893,7 +932,7 @@ class TicTacToePlugin(Star):
             yield event.plain_result(f"刷新棋盘失败：{type(exc).__name__}: {exc}")
             return
         if is_over(state["board"]):
-            await self._retire(origin)
+            await self._retire(origin, keep_cards=True)
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL
@@ -929,6 +968,7 @@ class TicTacToePlugin(Star):
             await hub.send_ephemeral_card(
                 origin,
                 lobby.build_lobby_card(spec, self._level(origin, spec)),
+                session_id=self._ui_session(origin, spec),
                 msg_id=str(event.message_obj.message_id or "") or None,
                 initiator_openid=str(event.get_sender_id() or ""),
             )

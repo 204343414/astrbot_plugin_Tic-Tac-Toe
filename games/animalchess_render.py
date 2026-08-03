@@ -146,6 +146,34 @@ def _draw_fallback_board() -> Image.Image:
 _PIECE_CACHE: dict[tuple[str, int], Image.Image | None] = {}
 
 
+def _fit_square(image: Image.Image, size: int) -> Image.Image:
+    """Scale to fit a size x size box **without distorting the artwork**.
+
+    Forcing every piece to a square stretched any drawing that was not already
+    1:1 -- a wide tiger came out squashed. The image is scaled by the smaller
+    ratio so the whole thing fits, then centred on a transparent square, which
+    keeps every piece the same footprint on the board while leaving proportions
+    untouched.
+    """
+    width, height = image.size
+    if not width or not height:
+        return image
+    ratio = min(size / width, size / height)
+    scaled = image.resize(
+        (max(1, round(width * ratio)), max(1, round(height * ratio))),
+        Image.LANCZOS,
+    )
+    if scaled.size == (size, size):
+        return scaled
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.paste(
+        scaled,
+        ((size - scaled.width) // 2, (size - scaled.height) // 2),
+        scaled,
+    )
+    return canvas
+
+
 def _load_piece(animal: str, size: int) -> Image.Image | None:
     key = (animal, size)
     if key in _PIECE_CACHE:
@@ -156,7 +184,7 @@ def _load_piece(animal: str, size: int) -> Image.Image | None:
         try:
             loaded = Image.open(path).convert("RGBA")
             if not _is_blank(loaded):
-                image = loaded.resize((size, size), Image.LANCZOS)
+                image = _fit_square(loaded, size)
         except Exception:
             image = None
     _PIECE_CACHE[key] = image

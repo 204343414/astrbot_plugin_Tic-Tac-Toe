@@ -499,3 +499,44 @@ def test_both_sides_share_one_image_per_animal():
     render = pytest.importorskip("games.animalchess_render", reason="需要 Pillow")
     assert render.piece_asset_path(ac.RAT).endswith("rat.png")
     assert "red" not in render.piece_asset_path(ac.RAT)
+
+
+def test_piece_art_keeps_its_aspect_ratio():
+    """Forcing every piece into a square squashed non-1:1 artwork.
+
+    The image is scaled to *fit* the cell box and centred on a transparent
+    square, so each piece occupies the same footprint on the board while its
+    proportions stay exactly as drawn.
+    """
+    render = pytest.importorskip("games.animalchess_render", reason="需要 Pillow")
+    from PIL import Image
+
+    for size_in, expected_ratio in (((400, 200), 2.0), ((120, 480), 0.25),
+                                    ((256, 256), 1.0)):
+        art = Image.new("RGBA", size_in, (255, 0, 0, 255))
+        fitted = render._fit_square(art, 100)
+        assert fitted.size == (100, 100), "外框必须是正方形，保证每格占位一致"
+        box = fitted.getbbox()
+        width, height = box[2] - box[0], box[3] - box[1]
+        assert width / height == pytest.approx(expected_ratio, rel=0.02), (
+            f"{size_in} 被拉伸了"
+        )
+        assert max(width, height) == 100, "应缩放到刚好贴合，不留多余空白"
+
+
+def test_a_square_piece_is_untouched():
+    render = pytest.importorskip("games.animalchess_render", reason="需要 Pillow")
+    from PIL import Image
+
+    fitted = render._fit_square(Image.new("RGBA", (256, 256), (0, 0, 255, 255)), 64)
+    assert fitted.size == (64, 64)
+
+
+def test_loading_a_piece_never_distorts_it():
+    """The loader must go through the aspect-preserving path, not resize()."""
+    source = Path(__file__).resolve().parents[1].joinpath(
+        "games/animalchess_render.py").read_text("utf-8")
+    loader = source[source.index("def _load_piece"):]
+    loader = loader[: loader.index("def clear_asset_cache")]
+    assert "_fit_square(loaded, size)" in loader
+    assert ".resize((size, size)" not in loader, "直接拉成正方形会压扁棋子"
