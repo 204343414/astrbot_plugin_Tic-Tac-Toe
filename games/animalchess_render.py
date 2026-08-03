@@ -43,6 +43,13 @@ CELL_HEIGHT = (BOARD_HEIGHT - GRID_TOP * 2) / ac.ROWS
 #: upload budget matters more than pixels nobody sees.
 SCALE = 0.5
 
+#: Encoded as JPEG, not PNG. The board artwork is a watercolour photograph-like
+#: image, which PNG stores terribly: the real board came out at 1.1 MB, versus
+#: ~180 KB as JPEG at this quality with no visible difference. Smaller uploads
+#: are also less likely to trip QQ's "系统繁忙" on the media endpoint.
+#: QQ's file_type=1 accepts png *and* jpg, so this is purely our choice.
+JPEG_QUALITY = 85
+
 ASSET_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "assets", "animalchess",
@@ -246,7 +253,9 @@ def render_board(state: dict[str, Any]) -> bytes:
             Image.LANCZOS,
         )
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
+    # JPEG has no alpha channel; the board is fully opaque anyway.
+    image.convert("RGB").save(
+        buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     return buffer.getvalue()
 
 

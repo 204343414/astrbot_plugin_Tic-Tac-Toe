@@ -472,7 +472,7 @@ def test_the_board_renders_without_any_artwork():
     """Placeholders are blank on purpose; the game must still be playable."""
     render = pytest.importorskip("games.animalchess_render", reason="需要 Pillow")
     data = render.render_board(ac.new_state(ac.MODE_AI, "U1"))
-    assert data.startswith(b"\x89PNG")
+    assert data[:3] == b"\xff\xd8\xff", "应输出 JPEG"
     assert len(data) > 5000
 
 
@@ -540,3 +540,15 @@ def test_loading_a_piece_never_distorts_it():
     loader = loader[: loader.index("def clear_asset_cache")]
     assert "_fit_square(loaded, size)" in loader
     assert ".resize((size, size)" not in loader, "直接拉成正方形会压扁棋子"
+
+
+def test_the_board_is_encoded_small_enough_for_chat():
+    """The watercolour board is 1.1 MB as PNG and ~180 KB as JPEG.
+
+    Every move re-uploads the picture, so the encoding is not cosmetic: a
+    smaller body is faster and less likely to trip QQ's busy media endpoint.
+    """
+    render = pytest.importorskip("games.animalchess_render", reason="需要 Pillow")
+    data = render.render_board(ac.new_state(ac.MODE_AI, "U1"))
+    assert data[:3] == b"\xff\xd8\xff", "JPEG 才能把水彩底图压下来"
+    assert len(data) < 400_000, f"棋盘图 {len(data)//1024} KB 偏大"
