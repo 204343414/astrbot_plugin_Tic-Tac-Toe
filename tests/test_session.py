@@ -152,7 +152,7 @@ def test_only_one_gomoku_match_per_group():
 
 def test_board_send_touches_the_idle_deadline():
     source = _main_source()
-    sender = source[source.index("async def _send_gomoku_board"):]
+    sender = source[source.index("async def _send_picture_board"):]
     sender = sender[: sender.index("async def _retire")]
     assert "_matches.touch(state)" in sender, "每次刷新棋盘都应续期"
 

@@ -22,6 +22,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+from .games import animalchess as ach
 from .games import gomoku as gk
 from .games import lobby
 from .games import tictactoe as ttt
@@ -49,8 +50,8 @@ OWNER = PLUGIN_NAME
 @register(
     PLUGIN_NAME,
     "204343414",
-    "QQ 官方机器人棋类小游戏：井字棋与五子棋，支持群友对战与 AI 对战。",
-    "0.4.1",
+    "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
+    "0.5.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -149,6 +150,8 @@ class TicTacToePlugin(Star):
              self._act_lobby_tictactoe),
             ("gomoku.lobby", "⚫ 五子棋", "打开五子棋卡片：人机 / 群友 / 三档难度。",
              self._act_lobby_gomoku),
+            ("animalchess.lobby", "🐯 斗兽棋", "打开斗兽棋卡片：人机 / 群友 / 三档难度。",
+             self._act_lobby_animalchess),
 
             ("tictactoe.start_ai", "井字棋：人机对战", "由井字棋卡片触发。", self._act_start_ai),
             ("tictactoe.start_pvp", "井字棋：群友对战", "由井字棋卡片触发。", self._act_start_pvp),
@@ -166,6 +169,16 @@ class TicTacToePlugin(Star):
             ("gomoku.join", "五子棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘图。",
              self._act_gomoku_join),
             ("gomoku.quit", "五子棋结束对局", "结束当前群的五子棋对局。", self._act_quit),
+
+            ("animalchess.start_ai", "斗兽棋：人机对战", "由斗兽棋卡片触发。",
+             self._act_animalchess_ai),
+            ("animalchess.start_pvp", "斗兽棋：群友对战", "由斗兽棋卡片触发。",
+             self._act_animalchess_pvp),
+            ("animalchess.set_level", "斗兽棋：切换难度", "由斗兽棋卡片触发。",
+             self._act_set_level_animalchess),
+            ("animalchess.join", "斗兽棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘图。",
+             self._act_animalchess_join),
+            ("animalchess.quit", "斗兽棋结束对局", "结束当前群的斗兽棋对局。", self._act_quit),
         ]
         for action_id, title, description, callback in specs:
             hub.actions.register(ActionSpec(
@@ -238,6 +251,9 @@ class TicTacToePlugin(Star):
     async def _act_lobby_gomoku(self, context, params) -> int:
         return await self._open_lobby(context, gk.SPEC)
 
+    async def _act_lobby_animalchess(self, context, params) -> int:
+        return await self._open_lobby(context, ach.SPEC)
+
     async def _open_lobby(self, context, spec) -> int:
         """Re-send a game's entry card. Each game owns its own; neither is a
         menu of the other."""
@@ -257,6 +273,9 @@ class TicTacToePlugin(Star):
 
     async def _act_set_level_gomoku(self, context, params) -> int:
         return await self._set_level(context, gk.SPEC, params)
+
+    async def _act_set_level_animalchess(self, context, params) -> int:
+        return await self._set_level(context, ach.SPEC, params)
 
     async def _set_level(self, context, spec, params) -> int:
         """Difficulty is remembered per group *and per game*:井字棋困难 and
@@ -408,7 +427,7 @@ class TicTacToePlugin(Star):
                 label = await self._label_of(context, context.member_openid)
                 await self._send_card(context, gk.build_waiting_card(state, label))
                 return 0
-            await self._send_gomoku_board(context.origin, state,
+            await self._send_picture_board(context.origin, state,
                                           client=context.client,
                                           interaction=context.interaction)
         except Exception:
@@ -434,11 +453,62 @@ class TicTacToePlugin(Star):
         state["players"][gk.WHITE] = context.member_openid
         state["phase"] = gk.PHASE_PLAYING
         try:
-            await self._send_gomoku_board(context.origin, state,
+            await self._send_picture_board(context.origin, state,
                                           client=context.client,
                                           interaction=context.interaction)
         except Exception:
             logger.exception("[Gomoku] Failed to open board after join")
+            return 1
+        return 0
+
+    # --- animal chess (picture board, quote-to-move) ------------------------
+
+    async def _act_animalchess_ai(self, context, params) -> int:
+        return await self._start_animalchess(context, ach.MODE_AI)
+
+    async def _act_animalchess_pvp(self, context, params) -> int:
+        return await self._start_animalchess(context, ach.MODE_PVP)
+
+    async def _start_animalchess(self, context, mode: str) -> int:
+        busy = self._matches.busy_reason(context.origin)
+        if busy:
+            logger.info("[AnimalChess] %s", busy)
+            return 2  # 操作频繁：本群已有对局
+        state = ach.new_state(mode, context.member_openid,
+                              self._level(context.origin, ach.SPEC))
+        state["display_name"] = ach.SPEC.title
+        self._matches.start(context.origin, state)
+        try:
+            if mode == ach.MODE_PVP:
+                label = await self._label_of(context, context.member_openid)
+                await self._send_card(context, ach.build_waiting_card(state, label))
+                return 0
+            await self._send_picture_board(context.origin, state,
+                                           client=context.client,
+                                           interaction=context.interaction)
+        except Exception:
+            logger.exception("[AnimalChess] Failed to open board")
+            self._matches.pop(context.origin)
+            return 1
+        return 0
+
+    async def _act_animalchess_join(self, context, params) -> int:
+        """Second player takes the 🔵 seat, and only then is a board drawn."""
+        state = self._matches.get(context.origin)
+        if state is None or state.get("game") != "animalchess":
+            return 3
+        if state.get("phase") != ach.PHASE_WAITING:
+            return 3  # already started; the 🔵 seat is taken
+        if context.member_openid == state["players"].get(ach.RED, ""):
+            return 4  # toast only; the card stays usable for a real opponent
+        state["players"][ach.BLUE] = context.member_openid
+        state["phase"] = ach.PHASE_PLAYING
+        try:
+            await self._send_picture_board(context.origin, state,
+                                           client=context.client,
+                                           interaction=context.interaction)
+        except Exception:
+            logger.exception("[AnimalChess] Failed to open board after join")
             return 1
         return 0
 
@@ -477,12 +547,16 @@ class TicTacToePlugin(Star):
         except Exception:
             return ""
 
-    async def _send_gomoku_board(self, origin: str, state: dict[str, Any],
-                                 client=None, interaction=None,
-                                 msg_id: str | None = None) -> None:
-        """Render and send the board, remembering the id players must quote."""
-        from .games import gomoku_render as gr
+    async def _send_picture_board(self, origin: str, state: dict[str, Any],
+                                  client=None, interaction=None,
+                                  msg_id: str | None = None) -> None:
+        """Render and send a picture board, remembering the id to quote.
 
+        Shared by every game whose board is an image. Only the render call
+        differs, so it is dispatched on ``state["game"]`` rather than copied --
+        the send/label/quote plumbing is identical and was worth getting right
+        exactly once.
+        """
         hub = self._get_hub()
         if hub is None:
             raise RuntimeError("QQ Official Hub 不可用")
@@ -496,8 +570,14 @@ class TicTacToePlugin(Star):
                     pass
         state["labels"] = labels
 
-        avatars = await self._fetch_avatars(origin, state)
-        image = gr.render_board(state, avatars)
+        if state.get("game") == "animalchess":
+            from .games import animalchess_render as ar
+
+            image = ar.render_board(state)
+        else:
+            from .games import gomoku_render as gr
+
+            image = gr.render_board(state, await self._fetch_avatars(origin, state))
         event_id = ""
         if interaction is not None:
             event_id = self._hub_module(hub, "passive_reply").passive_event_id(
@@ -582,7 +662,7 @@ class TicTacToePlugin(Star):
             gk.maybe_ai_move(state)
         self._matches.touch(state)
         try:
-            await self._send_gomoku_board(
+            await self._send_picture_board(
                 origin, state,
                 msg_id=str(event.message_obj.message_id or "") or None,
             )
@@ -597,6 +677,72 @@ class TicTacToePlugin(Star):
             )
             return
         if gk.is_over(state["board"]):
+            self._matches.pop(origin)
+            self._avatars.pop(origin, None)
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    # Same priority reasoning as the gomoku handler: outrank the Hub's
+    # catch-all panel hint so a quoted move is not swallowed first.
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=200)
+    async def animalchess_move_by_quote(self, event: AstrMessageEvent):
+        """Play by quoting the board image and naming a piece and direction.
+
+        63 squares cannot be buttons (25 max) and a coordinate grid would be
+        unreadable, so moves are phrases like 鼠下. Each side owns exactly one
+        of every animal, so the piece is unambiguous once the mover is known.
+        """
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if "GroupMessage" not in origin:
+            return
+        for dead_origin, _ in self._matches.sweep():
+            self._avatars.pop(dead_origin, None)
+            logger.info("[AnimalChess] Match in %s expired",
+                        dead_origin.split(":")[-1][-8:])
+        state = self._matches.get(origin)
+        if state is None or state.get("game") != "animalchess":
+            return
+        if state.get("phase") == ach.PHASE_WAITING:
+            return  # nobody has taken the 🔵 seat yet; there is no board to quote
+        parsed = ach.parse_move(event.get_message_str())
+        if parsed is None:
+            return
+        animal, direction = parsed
+
+        board_id = str(state.get("board_msg_id") or "")
+        quoted = quoted_message_ids(event)
+        if not quoted:
+            return          # saying "鼠下" in conversation is not a move
+        if board_id and board_id not in quoted:
+            logger.info(
+                "[AnimalChess] Quoted id %s does not match the board id %s; "
+                "accepting the move anyway", ",".join(quoted), board_id,
+            )
+        event.stop_event()
+
+        actor = str(event.get_sender_id() or "")
+        refusal = ach.apply_move(state, animal, direction, actor)
+        if refusal:
+            yield event.plain_result(f"❌ {refusal}")
+            return
+        if not ach.is_over(state):
+            ach.maybe_ai_move(state)
+        self._matches.touch(state)
+        try:
+            await self._send_picture_board(
+                origin, state,
+                msg_id=str(event.message_obj.message_id or "") or None,
+            )
+        except Exception as exc:
+            logger.exception("[AnimalChess] Failed to refresh board")
+            yield event.plain_result(
+                f"走棋已记录（{ach.NAMES[animal]}{direction}），但棋盘图没发出来："
+                f"{self._describe(exc)}\n发送 /棋盘 可以重新出图。"
+            )
+            return
+        if ach.is_over(state):
             self._matches.pop(origin)
             self._avatars.pop(origin, None)
 
@@ -623,20 +769,30 @@ class TicTacToePlugin(Star):
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         state = self._matches.get(origin)
-        if state is None or state.get("game") != "gomoku":
-            yield event.plain_result("本群当前没有五子棋对局。")
+        if state is None or state.get("game") not in ("gomoku", "animalchess"):
+            yield event.plain_result("本群当前没有图片棋盘对局。")
             return
         if state.get("phase") == gk.PHASE_WAITING:
             yield event.plain_result("对局还在等对手加入，尚未开始。")
             return
         try:
-            await self._send_gomoku_board(
+            await self._send_picture_board(
                 origin, state,
                 msg_id=str(event.message_obj.message_id or "") or None,
             )
         except Exception as exc:
             logger.exception("[Gomoku] Failed to redraw board")
             yield event.plain_result(f"出图失败：{self._describe(exc)}")
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("斗兽棋", alias={"animalchess", "jungle"})
+    async def animalchess_from_command(self, event: AstrMessageEvent):
+        """/斗兽棋 —— 打开斗兽棋卡片，由按钮选择对战方式与难度。"""
+        async for result in self._lobby_from_command(event, ach.SPEC):
+            yield result
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL

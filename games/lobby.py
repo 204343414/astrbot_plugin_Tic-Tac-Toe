@@ -135,6 +135,14 @@ TICTACTOE = GameSpec(
     guest_mark="❌",
 )
 
+ANIMALCHESS = GameSpec(
+    key="animalchess",
+    title="斗兽棋",
+    how_to="棋盘是图片：**引用棋盘图回复「动物+方向」**（如 鼠下）走棋，攻入兽穴即胜。",
+    host_mark="🔴",
+    guest_mark="🔵",
+)
+
 GOMOKU = GameSpec(
     key="gomoku",
     title="五子棋",
