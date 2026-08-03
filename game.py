@@ -255,17 +255,23 @@ def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
     return {
         "id": "tictactoe_lobby",
         "markdown": "\n".join([
-            "# 井字棋",
+            "# 棋类小游戏",
             f"当前 AI 难度：**{LEVEL_LABELS[level]}**",
             "",
-            "选择对战方式开始游戏。",
+            "井字棋用按钮落子；五子棋是图片棋盘，**引用棋盘图回复坐标**（如 H8）落子。",
         ]),
         "rows": [
             [
-                {"id": "start_ai", "label": "🤖 人机对战", "style": 1,
+                {"id": "start_ai", "label": "🤖 井字棋·人机", "style": 1,
                  "action_id": "tictactoe.start_ai", "params": {"level": level}},
-                {"id": "start_pvp", "label": "👥 群友对战", "style": 1,
+                {"id": "start_pvp", "label": "👥 井字棋·群友", "style": 1,
                  "action_id": "tictactoe.start_pvp", "params": {}},
+            ],
+            [
+                {"id": "gomoku_ai", "label": "🤖 五子棋·人机", "style": 1,
+                 "action_id": "gomoku.start_ai", "params": {}},
+                {"id": "gomoku_pvp", "label": "👥 五子棋·群友", "style": 1,
+                 "action_id": "gomoku.start_pvp", "params": {}},
             ],
             [
                 {"id": f"level_{name}",

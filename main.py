@@ -22,6 +22,8 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+from .games import gomoku as gk
+from .games.session import AvatarCache, MatchRegistry
 from .game import (
     AI,
     AI_LEVELS,
@@ -49,8 +51,8 @@ OWNER = PLUGIN_NAME
 @register(
     PLUGIN_NAME,
     "204343414",
-    "QQ 官方机器人井字棋：群友对战或与 AI 对战，全部由卡片按钮驱动。",
-    "0.1.0",
+    "QQ 官方机器人棋类小游戏：井字棋与五子棋，支持群友对战与 AI 对战。",
+    "0.2.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -62,12 +64,19 @@ class TicTacToePlugin(Star):
         # not worth persisting across restarts, and the cards expire anyway.
         self._games: dict[str, dict[str, Any]] = {}
         self._levels: dict[str, str] = {}
+        # Gomoku boards are pictures, so they need their own registry: one
+        # match per group, an idle deadline, and avatars cached per match.
+        self.idle_timeout = int((self.config or {}).get("idle_timeout_seconds", 90))
+        self._matches = MatchRegistry(self.idle_timeout)
+        self._avatars: dict[str, AvatarCache] = {}
         self._hub = None
 
     async def initialize(self) -> None:
         self._register_actions()
 
     async def terminate(self) -> None:
+        self._matches.clear()
+        self._avatars.clear()
         hub = self._get_hub(quiet=True)
         if hub is not None:
             try:
@@ -135,6 +144,8 @@ class TicTacToePlugin(Star):
 
         specs = (
             ("tictactoe.lobby", "🎮 井字棋", "打开井字棋大厅卡片，选择对战方式。", self._act_lobby),
+            ("gomoku.start_ai", "⚫ 五子棋：人机对战", "开始一局与 AI 的五子棋（图片棋盘）。", self._act_gomoku_ai),
+            ("gomoku.start_pvp", "⚫ 五子棋：群友对战", "开始一局群友对战的五子棋（图片棋盘）。", self._act_gomoku_pvp),
             ("tictactoe.start_ai", "井字棋：人机对战", "由大厅卡片触发。", self._act_start_ai),
             ("tictactoe.start_pvp", "井字棋：群友对战", "由大厅卡片触发。", self._act_start_pvp),
             ("tictactoe.set_level", "井字棋：切换难度", "由大厅卡片触发。", self._act_set_level),
@@ -336,6 +347,103 @@ class TicTacToePlugin(Star):
         await self._retire(context.origin)
         return await self._start(context, mode)
 
+    # --- gomoku (picture board, quote-to-move) ------------------------------
+
+    async def _act_gomoku_ai(self, context, params) -> int:
+        return await self._start_gomoku(context, gk.MODE_AI)
+
+    async def _act_gomoku_pvp(self, context, params) -> int:
+        return await self._start_gomoku(context, gk.MODE_PVP)
+
+    async def _start_gomoku(self, context, mode: str) -> int:
+        busy = self._matches.busy_reason(context.origin)
+        if busy:
+            logger.info("[Gomoku] %s", busy)
+            return 2  # 操作频繁：本群已有对局
+        state = gk.new_state(mode, context.member_openid, self._level(context.origin))
+        state["display_name"] = "五子棋"
+        self._matches.start(context.origin, state)
+        self._avatars[context.origin] = AvatarCache()
+        try:
+            await self._send_gomoku_board(context.origin, state,
+                                          client=context.client,
+                                          interaction=context.interaction)
+        except Exception:
+            logger.exception("[Gomoku] Failed to open board")
+            self._matches.pop(context.origin)
+            return 1
+        return 0
+
+    async def _fetch_avatars(self, origin: str, state: dict[str, Any]) -> dict:
+        from .games import gomoku_render as gr
+
+        appid = self._appid_of(origin)
+        if not appid:
+            return {}
+        cache = self._avatars.setdefault(origin, AvatarCache())
+
+        async def fetch(openid: str):
+            import aiohttp
+
+            url = gr.avatar_url(appid, openid)
+            if not url:
+                return None
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as s:
+                async with s.get(url) as response:
+                    if response.status != 200:
+                        return None
+                    return await response.read()
+
+        seats = {
+            mark: openid for mark, openid in (state.get("players") or {}).items()
+            if openid
+        }
+        return await cache.get_many(seats, fetch)
+
+    def _appid_of(self, origin: str) -> str:
+        try:
+            platform = self.context.get_platform_inst(origin.split(":", 1)[0])
+            config = getattr(platform, "config", None) or {}
+            return str(config.get("appid") or getattr(platform, "appid", "") or "")
+        except Exception:
+            return ""
+
+    async def _send_gomoku_board(self, origin: str, state: dict[str, Any],
+                                 client=None, interaction=None,
+                                 msg_id: str | None = None) -> None:
+        """Render and send the board, remembering the id players must quote."""
+        from .games import gomoku_render as gr
+
+        hub = self._get_hub()
+        if hub is None:
+            raise RuntimeError("QQ Official Hub 不可用")
+        book = getattr(hub, "identities", None)
+        labels = {}
+        for mark, openid in (state.get("players") or {}).items():
+            if openid and book is not None:
+                try:
+                    labels[mark] = await book.label_for(origin, openid)
+                except Exception:
+                    pass
+        state["labels"] = labels
+
+        avatars = await self._fetch_avatars(origin, state)
+        image = gr.render_board(state, avatars)
+        event_id = ""
+        if interaction is not None:
+            event_id = self._hub_module(hub, "passive_reply").passive_event_id(
+                interaction
+            )
+        sent_id = await hub.send_image_message(
+            origin, image, text=gk.move_hint(state),
+            client=client, event_id=event_id or None, msg_id=msg_id,
+        )
+        # Players must quote this exact message to move; without an id we fall
+        # back to accepting bare coordinates rather than blocking the game.
+        state["board_msg_id"] = sent_id
+        self._matches.touch(state)
+
     async def _retire(self, origin: str) -> None:
         state = self._games.pop(origin, None)
         hub = self._get_hub(quiet=True)
@@ -346,6 +454,102 @@ class TicTacToePlugin(Star):
                 logger.warning("[TicTacToe] Failed to retire session")
 
     # --- chat commands ------------------------------------------------------
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=80)
+    async def gomoku_move_by_quote(self, event: AstrMessageEvent):
+        """Play by quoting the board image and replying with a coordinate.
+
+        A 15x15 board cannot be buttons (25 max), so moves arrive as text.
+        Requiring a quote of the board is what separates a real move from
+        someone simply mentioning "H8" in conversation.
+        """
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if "GroupMessage" not in origin:
+            return
+        for dead_origin, _ in self._matches.sweep():
+            self._avatars.pop(dead_origin, None)
+            logger.info("[Gomoku] Match in %s expired", dead_origin.split(":")[-1][-8:])
+        state = self._matches.get(origin)
+        if state is None or state.get("game") != "gomoku":
+            return
+        text = str(event.get_message_str() or "").strip()
+        index = gk.parse_coordinate(text)
+        if index < 0:
+            return
+
+        board_id = str(state.get("board_msg_id") or "")
+        if board_id and not self._quotes(event, board_id):
+            return          # a coordinate that is not a reply to the board
+        event.stop_event()
+
+        actor = str(event.get_sender_id() or "")
+        refusal = gk.apply_move(state, index, actor)
+        if refusal:
+            yield event.plain_result(f"❌ {refusal}")
+            return
+        if not gk.is_over(state["board"]):
+            gk.maybe_ai_move(state)
+        self._matches.touch(state)
+        try:
+            await self._send_gomoku_board(
+                origin, state,
+                msg_id=str(event.message_obj.message_id or "") or None,
+            )
+        except Exception as exc:
+            logger.exception("[Gomoku] Failed to refresh board")
+            yield event.plain_result(f"刷新棋盘失败：{type(exc).__name__}: {exc}")
+            return
+        if gk.is_over(state["board"]):
+            self._matches.pop(origin)
+            self._avatars.pop(origin, None)
+
+    @staticmethod
+    def _quotes(event: AstrMessageEvent, message_id: str) -> bool:
+        """True when this message quotes ``message_id``."""
+        for component in (getattr(event.message_obj, "message", None) or []):
+            if str(getattr(component, "type", "")).endswith("Reply"):
+                if str(getattr(component, "id", "")) == message_id:
+                    return True
+        return False
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("五子棋", alias={"gomoku"})
+    async def gomoku_from_command(self, event: AstrMessageEvent, mode: str = ""):
+        """/五子棋 [对战] —— 开一局五子棋（图片棋盘，引用图片回坐标落子）。"""
+        event.stop_event()
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if "GroupMessage" not in origin:
+            yield event.plain_result("五子棋只能在 QQ 官方群里玩。")
+            return
+        busy = self._matches.busy_reason(origin)
+        if busy:
+            yield event.plain_result(busy)
+            return
+        if self._get_hub() is None:
+            yield event.plain_result("需要先安装并启用 QQ Official Hub 插件。")
+            return
+        chosen = gk.MODE_PVP if mode.strip() in ("对战", "pvp", "群友") else gk.MODE_AI
+        state = gk.new_state(chosen, str(event.get_sender_id() or ""),
+                             self._level(origin))
+        state["display_name"] = "五子棋"
+        self._matches.start(origin, state)
+        self._avatars[origin] = AvatarCache()
+        try:
+            await self._send_gomoku_board(
+                origin, state,
+                msg_id=str(event.message_obj.message_id or "") or None,
+            )
+        except Exception as exc:
+            self._matches.pop(origin)
+            logger.exception("[Gomoku] Failed to start")
+            yield event.plain_result(f"开局失败：{type(exc).__name__}: {exc}")
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL
