@@ -26,7 +26,7 @@ from .games import gomoku as gk
 from .games import lobby
 from .games import tictactoe as ttt
 from .games.lobby import AI_LEVELS, LEVEL_NORMAL
-from .games.session import AvatarCache, MatchRegistry
+from .games.session import AvatarCache, MatchRegistry, quoted_message_ids
 from .games.tictactoe import (
     AI,
     HUMAN,
@@ -50,7 +50,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋与五子棋，支持群友对战与 AI 对战。",
-    "0.3.0",
+    "0.4.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -503,8 +503,11 @@ class TicTacToePlugin(Star):
             event_id = self._hub_module(hub, "passive_reply").passive_event_id(
                 interaction
             )
+        # No caption. The hint is drawn *inside* the picture (render_board);
+        # passing it as text too printed it twice -- once in the image and once
+        # in the chat body, which is exactly what it was moved in to avoid.
         sent_id = await hub.send_image_message(
-            origin, image, text=gk.move_hint(state),
+            origin, image,
             client=client, event_id=event_id or None, msg_id=msg_id,
         )
         # Players must quote this exact message to move; without an id we fall
@@ -555,8 +558,19 @@ class TicTacToePlugin(Star):
             return
 
         board_id = str(state.get("board_msg_id") or "")
-        if board_id and not self._quotes(event, board_id):
-            return          # a coordinate that is not a reply to the board
+        quoted = quoted_message_ids(event)
+        if not quoted:
+            return          # a bare coordinate in conversation is not a move
+        if board_id and board_id not in quoted:
+            # They quoted *something* and typed a coordinate during a live
+            # match, so treat it as a move -- but say so, because a mismatch
+            # means the id QQ echoed on send differs from the one it reports
+            # on quote, and that is worth knowing.
+            logger.info(
+                "[Gomoku] Quoted id %s does not match the board id %s; "
+                "accepting the move anyway",
+                ",".join(quoted), board_id,
+            )
         event.stop_event()
 
         actor = str(event.get_sender_id() or "")
@@ -579,15 +593,6 @@ class TicTacToePlugin(Star):
         if gk.is_over(state["board"]):
             self._matches.pop(origin)
             self._avatars.pop(origin, None)
-
-    @staticmethod
-    def _quotes(event: AstrMessageEvent, message_id: str) -> bool:
-        """True when this message quotes ``message_id``."""
-        for component in (getattr(event.message_obj, "message", None) or []):
-            if str(getattr(component, "type", "")).endswith("Reply"):
-                if str(getattr(component, "id", "")) == message_id:
-                    return True
-        return False
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL

@@ -128,3 +128,24 @@ class AvatarCache:
             if data:
                 result[mark] = data
         return result
+
+
+def quoted_message_ids(event: object) -> list[str]:
+    """Every message id the event quotes; empty when it quotes nothing.
+
+    Lives here rather than in ``main.py`` so it can be tested without AstrBot
+    installed -- this is the check that decides whether a coordinate is a move,
+    and it silently ate a real one once already.
+
+    It returns ids instead of a yes/no verdict on purpose. Demanding an exact
+    match against the board's id made quoted moves vanish: the id QQ echoes
+    when the picture is sent is not always the id it reports back on the quote.
+    A Reply component with no usable id still yields ``["?"]``, because "they
+    quoted something" is the fact the caller needs.
+    """
+    ids: list[str] = []
+    for component in (getattr(getattr(event, "message_obj", None), "message", None) or []):
+        if not str(getattr(component, "type", "")).endswith("Reply"):
+            continue
+        ids.append(str(getattr(component, "id", "") or ""))
+    return [value for value in ids if value] or (["?"] if ids else [])

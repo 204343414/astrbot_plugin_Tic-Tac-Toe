@@ -251,10 +251,24 @@ def test_labels_only_on_top_and_left():
 
 
 def test_move_hint_is_drawn_inside_the_image():
-    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
     source = Path(__file__).resolve().parents[1].joinpath(
         "games/gomoku_render.py").read_text("utf-8")
-    assert "hint = g.move_hint(state)" in source, "提示语应画进图片而非正文"
+    assert "g.move_hint(state)" in source, "提示语应画进图片而非正文"
+
+
+def test_the_hint_is_never_also_sent_as_the_image_caption():
+    """It goes in the picture *or* the body, never both.
+
+    Passing text= to send_image_message printed the hint a second time in the
+    chat body -- which is precisely what drawing it into the image was meant to
+    replace.
+    """
+    source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
+    call = source[source.index("await hub.send_image_message("):]
+    call = call[: call.index(")")]
+    assert "text=" not in call, "棋盘图不应再带正文说明，提示语已在图内"
+    assert "move_hint" not in call
 
 
 def test_tofu_detection_rejects_a_font_without_cjk():
@@ -269,8 +283,63 @@ def test_tofu_detection_rejects_a_font_without_cjk():
     assert render._can_render_cjk(dejavu) is False, "豆腐块不算能渲染中文"
 
 
+# --- the bundled font -------------------------------------------------------
+
+def test_a_cjk_font_ships_with_the_plugin():
+    """No system font, no apt-get: Chinese must work out of the box.
+
+    Scanning system fonts and silently switching the whole board to English is
+    what produced "为什么我的棋盘是英文的" on a stock Docker image.
+    """
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    import os
+
+    path = render.bundled_font_path()
+    assert os.path.exists(path), "内置字体缺失，Docker 部署会退化成方框或英文"
+    assert os.path.getsize(path) > 1_000_000
+
+
+def test_the_bundled_font_alone_renders_chinese():
+    """Proven by loading *only* the bundled file, with system fonts ignored."""
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    original = render._discover_font_paths
+    render._FONT_CACHE.clear()
+    render._discover_font_paths = lambda: [render.bundled_font_path()]
+    try:
+        assert render.has_cjk_font() is True
+        assert render._fit("轮到你落子") == "轮到你落子"
+        state = g.new_state(g.MODE_AI, "U1")
+        state["labels"] = {g.BLACK: "无所事事"}
+        assert render.render_board(state).startswith(b"\x89PNG")
+    finally:
+        render._discover_font_paths = original
+        render._FONT_CACHE.clear()
+
+
+def test_the_bundled_font_covers_every_word_the_board_draws():
+    """Each glyph checked individually -- one missing char is one tofu box."""
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    from PIL import ImageFont
+
+    font = ImageFont.truetype(render.bundled_font_path(), 24)
+    missing = bytes(font.getmask("\ue000"))
+    words = "黑白轮到你落子赢了平局思考中引用本图回复坐标例如上手待加入对战难度"
+    absent = [ch for ch in words
+              if not bytes(font.getmask(ch)) or bytes(font.getmask(ch)) == missing]
+    assert absent == [], f"内置字体缺字形: {absent}"
+
+
+def test_system_fonts_still_win_when_present():
+    """The bundle is a floor, not a preference: a nicer host font is used."""
+    render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    paths = render._discover_font_paths()
+    assert paths[-1] == render.bundled_font_path(), "内置字体应排在系统字体之后"
+
+
 def test_board_degrades_to_ascii_without_a_cjk_font():
     render = pytest.importorskip("games.gomoku_render", reason="需要 Pillow")
+    # Only reachable on a corrupt install now that a CJK font is bundled; kept
+    # so the degraded path still produces a readable board rather than crashing.
     import os
     if not os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
         pytest.skip("测试环境没有 DejaVu")

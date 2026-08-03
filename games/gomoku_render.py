@@ -65,7 +65,26 @@ def _can_render_cjk(font) -> bool:
         return False
 
 
+#: Shipped with the plugin so a bare Docker image still renders Chinese.
+#: WenQuanYi Micro Hei, Apache-2.0, ~5 MB, full GBK coverage. See
+#: assets/fonts/README.md for why this is bundled rather than required.
+BUNDLED_FONT = "assets/fonts/wqy-microhei.ttc"
+
+
+def bundled_font_path() -> str:
+    import os
+
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), BUNDLED_FONT
+    )
+
+
 def _discover_font_paths() -> list[str]:
+    """System fonts first, then the bundled one as a guaranteed floor.
+
+    A host that has Noto or Source Han installed gets the nicer face; a bare
+    container still gets Chinese instead of a wall of tofu.
+    """
     import glob
     import os
 
@@ -88,7 +107,11 @@ def _discover_font_paths() -> list[str]:
                 return index
         return len(_FONT_HINTS)
 
-    return sorted(set(found), key=rank)
+    ordered = sorted(set(found), key=rank)
+    bundled = bundled_font_path()
+    if os.path.exists(bundled) and bundled not in ordered:
+        ordered.append(bundled)
+    return ordered
 
 
 def _font(size: int):
@@ -107,8 +130,10 @@ def _font(size: int):
         if _can_render_cjk(font):
             _FONT_CACHE[size] = font
             return font
-    # No CJK font anywhere: fall back to any real font and let the caller
-    # switch to ASCII-only text, which beats a wall of tofu boxes.
+    # Reaching here means even the bundled font failed to load, which is a
+    # broken install rather than a missing system package. Take any real font
+    # so the board still renders, and say so once in the log -- silently
+    # switching the whole UI to English is what made this confusing before.
     for path in _discover_font_paths():
         try:
             font = ImageFont.truetype(path, size)
@@ -124,7 +149,11 @@ def _font(size: int):
 
 
 def has_cjk_font() -> bool:
-    """Whether the chosen font can draw Chinese; drives ASCII fallback text."""
+    """Whether the active font can draw Chinese.
+
+    Should now always be True: the plugin ships its own CJK font, so this is a
+    corruption check rather than a supported mode.
+    """
     if "cjk" not in _FONT_CACHE:
         _font(20)
         _FONT_CACHE.setdefault("cjk", True)
@@ -214,9 +243,7 @@ def render_board(
             marker = WHITE_STONE if mark == g.BLACK else BLACK_STONE
             draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=marker)
 
-    hint = g.move_hint(state)
-    if hint and not has_cjk_font():
-        hint = "Quote this image and reply e.g. H8"
+    hint = _fit(g.move_hint(state))
     if hint:
         draw.text((WIDTH // 2, HEIGHT - MARGIN // 2 - 4), hint,
                   font=_font(19), fill=TEXT, anchor="mm")
@@ -247,7 +274,7 @@ def _draw_players(image, draw, state, avatars, font_name, font_status) -> None:
         label = g.player_label(state, mark) or ("AI" if state["mode"] == g.MODE_AI else "待加入")
         side = ("黑" if mark == g.BLACK else "白") if has_cjk_font() else (
             "B" if mark == g.BLACK else "W"
-        )
+        )  # only reachable on a corrupt install; see has_cjk_font()
         anchor_x = x + size // 2
         name = _fit(str(label)) or ("AI" if state["mode"] == g.MODE_AI else "?")
         draw.text((anchor_x, y + size + 14), f"{side} {name}"[:14],

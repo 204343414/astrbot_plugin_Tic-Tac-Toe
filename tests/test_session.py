@@ -94,22 +94,53 @@ def _main_source() -> str:
     return Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
 
 
-def test_gomoku_requires_quoting_the_board():
+def _quote_handler(source: str) -> str:
+    """The body of gomoku_move_by_quote, up to the next decorated member."""
+    body = source[source.index("async def gomoku_move_by_quote"):]
+    end = body.index("    @filter.", 1)
+    return body[:end]
+
+
+def test_gomoku_requires_quoting_something():
     """A bare "H8" in conversation must not be treated as a move."""
     source = _main_source()
-    handler = source[source.index("async def gomoku_move_by_quote"):]
-    handler = handler[: handler.index("@staticmethod")]
-    assert "self._quotes(event, board_id)" in handler
-    assert "board_msg_id" in handler
+    handler = _quote_handler(source)
+    assert "quoted = quoted_message_ids(event)" in handler
+    assert "if not quoted:" in handler, "没有引用就不是落子"
 
 
-def test_move_falls_back_when_qq_reports_no_message_id():
-    """Blocking play is worse than accepting an un-quoted coordinate."""
+def test_a_quoted_move_is_never_discarded_over_an_id_mismatch():
+    """Requiring an exact id match silently ate real moves.
+
+    The player quoted the board and typed H8, and nothing happened: the id QQ
+    echoed when the picture was sent did not equal the id it reported back on
+    the quote. Losing someone's turn to that is far worse than acting on a
+    quote of the wrong message, so a mismatch is logged, not dropped.
+    """
     source = _main_source()
-    handler = source[source.index("async def gomoku_move_by_quote"):]
-    assert "if board_id and not self._quotes" in handler, (
-        "拿不到消息 id 时应降级放行，而不是让人无法落子"
-    )
+    handler = _quote_handler(source)
+    mismatch = handler[handler.index("if board_id and board_id not in quoted:"):]
+    mismatch = mismatch[: mismatch.index("event.stop_event()")]
+    assert "return" not in mismatch, "id 对不上时不能吞掉这一手"
+    assert "logger" in mismatch, "id 对不上应留下诊断"
+
+
+def test_quoted_ids_reads_every_reply_component():
+    """Unit-level: the helper reports ids rather than a yes/no verdict."""
+    from types import SimpleNamespace
+
+    from games.session import quoted_message_ids
+
+    def event_with(*components):
+        return SimpleNamespace(message_obj=SimpleNamespace(message=list(components)))
+
+    reply = SimpleNamespace(type="Reply", id="BOARD_1")
+    plain = SimpleNamespace(type="Plain", text="H8")
+    assert quoted_message_ids(event_with(plain)) == []
+    assert quoted_message_ids(event_with(reply, plain)) == ["BOARD_1"]
+    # A Reply that carries no usable id still counts as "they quoted something".
+    assert quoted_message_ids(event_with(SimpleNamespace(type="Reply", id=""))) == ["?"]
+    assert quoted_message_ids(SimpleNamespace(message_obj=None)) == []
 
 
 def test_only_one_gomoku_match_per_group():
