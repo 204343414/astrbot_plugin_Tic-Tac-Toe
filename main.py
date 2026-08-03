@@ -50,7 +50,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋与五子棋，支持群友对战与 AI 对战。",
-    "0.4.0",
+    "0.4.1",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -587,12 +587,56 @@ class TicTacToePlugin(Star):
                 msg_id=str(event.message_obj.message_id or "") or None,
             )
         except Exception as exc:
+            # The move is already on the board, so the match is *ahead* of what
+            # players can see. Say so and tell them how to redraw, rather than
+            # leaving them staring at a stale picture wondering if it counted.
             logger.exception("[Gomoku] Failed to refresh board")
-            yield event.plain_result(f"刷新棋盘失败：{type(exc).__name__}: {exc}")
+            yield event.plain_result(
+                f"落子已记录（{gk.format_coordinate(index)}），但棋盘图没发出来："
+                f"{self._describe(exc)}\n发送 /棋盘 可以重新出图。"
+            )
             return
         if gk.is_over(state["board"]):
             self._matches.pop(origin)
             self._avatars.pop(origin, None)
+
+    @staticmethod
+    def _describe(exc: BaseException) -> str:
+        """A one-line cause for chat.
+
+        QQ's own 5xx ("系统繁忙，请稍后重试") is by far the most common failure and
+        is nobody's fault, so it gets said plainly instead of as a stack-trace
+        class name that reads like a plugin crash.
+        """
+        text = str(exc).strip()
+        if type(exc).__name__ == "ServerError":
+            return f"QQ 服务端繁忙（{text or '稍后重试'}），重试 3 次仍失败"
+        return f"{type(exc).__name__}: {text}"
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("棋盘", alias={"board"})
+    async def redraw_board(self, event: AstrMessageEvent):
+        """/棋盘 —— 重新发一张当前棋盘图（上传失败后用）。"""
+        event.stop_event()
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        state = self._matches.get(origin)
+        if state is None or state.get("game") != "gomoku":
+            yield event.plain_result("本群当前没有五子棋对局。")
+            return
+        if state.get("phase") == gk.PHASE_WAITING:
+            yield event.plain_result("对局还在等对手加入，尚未开始。")
+            return
+        try:
+            await self._send_gomoku_board(
+                origin, state,
+                msg_id=str(event.message_obj.message_id or "") or None,
+            )
+        except Exception as exc:
+            logger.exception("[Gomoku] Failed to redraw board")
+            yield event.plain_result(f"出图失败：{self._describe(exc)}")
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL

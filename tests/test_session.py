@@ -165,3 +165,31 @@ def test_config_exposes_only_the_shared_timeout():
     )
     assert list(schema) == ["idle_timeout_seconds"], "配置应只保留通用项"
     assert schema["idle_timeout_seconds"]["default"] == 90
+
+
+# --- a failed upload must not lose the move ---------------------------------
+#
+# QQ answered "系统繁忙，请稍后重试" (its own HTTP 500) mid-game. The stone was
+# already on the board, so the match silently ran ahead of the last picture
+# players could see.
+
+def test_a_failed_send_reports_the_move_was_kept():
+    handler = _quote_handler(_main_source())
+    failure = handler[handler.index("except Exception as exc:"):]
+    assert "落子已记录" in failure, "发图失败时要说明这一手仍然算数"
+    assert "/棋盘" in failure, "要告诉玩家怎么把棋盘找回来"
+
+
+def test_a_redraw_command_exists_for_recovering_from_a_failed_send():
+    source = _main_source()
+    assert '@filter.command("棋盘"' in source
+    assert "async def redraw_board" in source
+
+
+def test_qq_server_errors_are_not_reported_as_a_plugin_crash():
+    """"ServerError: 系统繁忙" is Tencent's, and should not read like our bug."""
+    source = _main_source()
+    describe = source[source.index("def _describe("):]
+    describe = describe[: describe.index("@filter.")]
+    assert "ServerError" in describe
+    assert "QQ 服务端繁忙" in describe
