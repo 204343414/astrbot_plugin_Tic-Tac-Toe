@@ -16,6 +16,7 @@ Design constraints that shaped it (see the Hub's docs/EPHEMERAL_CARDS.md):
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -51,7 +52,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.5.0",
+    "0.6.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -586,6 +587,8 @@ class TicTacToePlugin(Star):
         # No caption. The hint is drawn *inside* the picture (render_board);
         # passing it as text too printed it twice -- once in the image and once
         # in the chat body, which is exactly what it was moved in to avoid.
+        previous_id = str(state.get("board_msg_id") or "")
+        previous_at = state.get("board_sent_at")
         sent_id = await hub.send_image_message(
             origin, image,
             client=client, event_id=event_id or None, msg_id=msg_id,
@@ -593,7 +596,32 @@ class TicTacToePlugin(Star):
         # Players must quote this exact message to move; without an id we fall
         # back to accepting bare coordinates rather than blocking the game.
         state["board_msg_id"] = sent_id
+        state["board_sent_at"] = time.time()
         self._matches.touch(state)
+
+        # Retire the previous board so a long game leaves one picture behind
+        # instead of one per move. Deliberately *after* the new board is up: if
+        # the send failed we raised already, and recalling first would leave the
+        # group with no board at all.
+        if previous_id and previous_id != sent_id:
+            await self._recall_quietly(origin, previous_id, previous_at, client)
+
+    async def _recall_quietly(self, origin: str, message_id: str,
+                              sent_at: float | None, client=None) -> None:
+        """Best-effort cleanup of a superseded board.
+
+        Never raises and never reports: the move already succeeded, and QQ
+        refuses recalls older than two minutes, so failure here is ordinary
+        rather than exceptional.
+        """
+        hub = self._get_hub(quiet=True)
+        if hub is None or not hasattr(hub, "recall_message"):
+            return          # older Hub; the extra pictures are only cosmetic
+        try:
+            await hub.recall_message(origin, message_id,
+                                     client=client, sent_at=sent_at)
+        except Exception:
+            logger.debug("[Games] Failed to recall the previous board")
 
     async def _retire(self, origin: str) -> None:
         state = self._matches.pop(origin)

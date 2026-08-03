@@ -193,3 +193,37 @@ def test_qq_server_errors_are_not_reported_as_a_plugin_crash():
     describe = describe[: describe.index("@filter.")]
     assert "ServerError" in describe
     assert "QQ 服务端繁忙" in describe
+
+
+# --- one board on screen, not one per move ----------------------------------
+
+def test_the_previous_board_is_recalled_after_the_new_one_is_up():
+    """Order matters: recall first and a failed send leaves no board at all."""
+    sender = _main_source()
+    sender = sender[sender.index("async def _send_picture_board"):]
+    sender = sender[: sender.index("async def _recall_quietly")]
+    send_at = sender.index("await hub.send_image_message")
+    recall_at = sender.index("_recall_quietly")
+    assert send_at < recall_at, "必须先发新图再撤旧图"
+    assert "previous_id != sent_id" in sender, "不能把刚发的那条撤掉"
+
+
+def test_the_board_records_when_it_was_sent():
+    """QQ refuses recalls past two minutes, so the timestamp is required."""
+    sender = _main_source()
+    assert 'state["board_sent_at"] = time.time()' in sender
+
+
+def test_recall_failures_never_reach_the_player():
+    source = _main_source()
+    body = source[source.index("async def _recall_quietly"):]
+    body = body[: body.index("async def _retire")]
+    assert "plain_result" not in body, "撤回失败不该打扰玩家"
+    assert "except Exception" in body
+
+
+def test_the_game_tolerates_a_hub_without_recall():
+    """An older Hub simply keeps the extra pictures; nothing should break."""
+    source = _main_source()
+    body = source[source.index("async def _recall_quietly"):]
+    assert 'hasattr(hub, "recall_message")' in body
