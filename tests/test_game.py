@@ -411,7 +411,7 @@ def test_status_never_leaks_a_raw_openid():
     text = status_text(state)
     assert openid not in text
     assert openid[-6:] not in text, "连后 6 位也不该直接示人"
-    assert "玩家…" in text, "无昵称时应给出可读占位"
+    assert "玩家" in text, "无昵称时应给出可读占位"
 
 
 def test_status_uses_injected_labels():
@@ -439,7 +439,7 @@ def test_ai_mode_status_is_unaffected_by_labels():
 
 def test_player_label_prefers_nickname_over_openid():
     state = new_state(MODE_PVP, "AAAA1111")
-    assert player_label(state, HUMAN).startswith("玩家…")
+    assert player_label(state, HUMAN).startswith("玩家")
     state["labels"] = {HUMAN: "小明"}
     assert player_label(state, HUMAN) == "小明"
 

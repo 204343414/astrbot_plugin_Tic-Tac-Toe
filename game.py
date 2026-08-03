@@ -152,8 +152,10 @@ def player_label(state: dict[str, Any], mark: str) -> str:
     label = str(labels.get(mark) or "").strip()
     if label:
         return label
+    # The Hub supplies a friendly placeholder when QQ gives no nickname (it
+    # never does in groups). Only fall back to our own if labels are absent.
     openid = str((state.get("players") or {}).get(mark) or "")
-    return f"玩家…{openid[-4:]}" if openid else ""
+    return f"玩家{openid[-4:]}" if openid else ""
 
 
 def build_card(state: dict[str, Any]) -> dict[str, Any]:
