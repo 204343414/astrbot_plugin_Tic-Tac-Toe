@@ -9,6 +9,15 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from . import lobby
+# Re-exported so callers (and tests) can keep importing the ladder from the
+# game they are working on, while there is only ever one definition of it.
+# Only the level *names* are needed here, to key LEVEL_SLIP. The list of
+# levels and their Chinese labels belong to the lobby, which is the only place
+# that renders them -- re-exporting them from every game would be three copies
+# of one fact.
+from .lobby import LEVEL_EASY, LEVEL_HARD, LEVEL_NORMAL
+
 EMPTY = ""
 HUMAN = "O"
 AI = "X"
@@ -32,13 +41,10 @@ PHASE_LOBBY = "lobby"
 PHASE_WAITING = "waiting"
 PHASE_PLAYING = "playing"
 
+SPEC = lobby.TICTACTOE
+
 #: AI strength. "perfect" never loses, which is correct and no fun to play
 #: against; tic-tac-toe is a draw under optimal play from both sides.
-LEVEL_EASY = "easy"
-LEVEL_NORMAL = "normal"
-LEVEL_HARD = "hard"
-AI_LEVELS = (LEVEL_EASY, LEVEL_NORMAL, LEVEL_HARD)
-LEVEL_LABELS = {LEVEL_EASY: "轻松", LEVEL_NORMAL: "普通", LEVEL_HARD: "困难"}
 #: Probability the AI plays a deliberately random move instead of its best one.
 LEVEL_SLIP = {LEVEL_EASY: 0.6, LEVEL_NORMAL: 0.25, LEVEL_HARD: 0.0}
 
@@ -247,73 +253,14 @@ def _current_owner(state: dict[str, Any]) -> str:
 
 
 def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
-    """The entry card every board game can copy: pick a mode, then play.
-
-    Deliberately not owner-locked -- anyone in the group may start a game.
-    """
-    level = level if level in AI_LEVELS else LEVEL_NORMAL
-    return {
-        "id": "tictactoe_lobby",
-        "markdown": "\n".join([
-            "# 棋类小游戏",
-            f"当前 AI 难度：**{LEVEL_LABELS[level]}**",
-            "",
-            "井字棋用按钮落子；五子棋是图片棋盘，**引用棋盘图回复坐标**（如 H8）落子。",
-        ]),
-        "rows": [
-            [
-                {"id": "start_ai", "label": "🤖 井字棋·人机", "style": 1,
-                 "action_id": "tictactoe.start_ai", "params": {"level": level}},
-                {"id": "start_pvp", "label": "👥 井字棋·群友", "style": 1,
-                 "action_id": "tictactoe.start_pvp", "params": {}},
-            ],
-            [
-                {"id": "gomoku_ai", "label": "🤖 五子棋·人机", "style": 1,
-                 "action_id": "gomoku.start_ai", "params": {}},
-                {"id": "gomoku_pvp", "label": "👥 五子棋·群友", "style": 1,
-                 "action_id": "gomoku.start_pvp", "params": {}},
-            ],
-            [
-                {"id": f"level_{name}",
-                 "label": f"{'✅ ' if name == level else ''}{LEVEL_LABELS[name]}",
-                 "style": 0,
-                 "action_id": "tictactoe.set_level", "params": {"level": name}}
-                for name in AI_LEVELS
-            ],
-        ],
-        "one_shot": False,
-        "ttl_seconds": 3600,
-    }
+    """This game's entry card, built from the shared five-button layout."""
+    return lobby.build_lobby_card(SPEC, level)
 
 
 def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str, Any]:
-    """Shown after "群友对战": one seat taken, waiting for an opponent."""
-    host = host_label or "发起者"
+    """Shown after 「群友对战」: one seat taken, waiting for an opponent."""
     host_openid = str((state.get("players") or {}).get(HUMAN) or "")
-    return {
-        "id": "tictactoe_waiting",
-        "markdown": "\n".join([
-            "# 井字棋 · 等待对手",
-            f"⭕ {host} 已入座，等待一位群友加入…",
-            "",
-            "点击「加入对战」成为 ❌ 方。",
-        ]),
-        "rows": [[
-            # NOT one_shot: the Hub consumes a one-shot button *before* the
-            # game sees the click, so the host tapping it once would burn the
-            # seat for everyone. Whether the seat is taken is game state, not
-            # button state.
-            {"id": "join", "label": "🙋 加入对战", "style": 1,
-             "action_id": "tictactoe.join", "params": {}, "one_shot": False},
-            # Only the host may cancel their own pending match.
-            {"id": "cancel", "label": "🔚 取消", "style": 0,
-             "action_id": "tictactoe.quit", "params": {}, "one_shot": False,
-             "owner_mode": "specified" if host_openid else "everyone",
-             "owner_openid": host_openid},
-        ]],
-        "one_shot": False,
-        "ttl_seconds": 1800,
-    }
+    return lobby.build_waiting_card(SPEC, host_label, host_openid)
 
 
 def new_state(mode: str, host_openid: str) -> dict[str, Any]:

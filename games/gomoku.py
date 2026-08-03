@@ -20,6 +20,15 @@ import random
 import re
 from typing import Any
 
+from . import lobby
+# Re-exported so callers (and tests) can keep importing the ladder from the
+# game they are working on, while there is only ever one definition of it.
+# Only the level *names* are needed here, to key LEVEL_SLIP. The list of
+# levels and their Chinese labels belong to the lobby, which is the only place
+# that renders them -- re-exporting them from every game would be three copies
+# of one fact.
+from .lobby import LEVEL_EASY, LEVEL_HARD, LEVEL_NORMAL
+
 SIZE = 15
 EMPTY = ""
 BLACK = "B"
@@ -30,11 +39,12 @@ WIN_LENGTH = 5
 MODE_AI = "ai"
 MODE_PVP = "pvp"
 
-LEVEL_EASY = "easy"
-LEVEL_NORMAL = "normal"
-LEVEL_HARD = "hard"
-AI_LEVELS = (LEVEL_EASY, LEVEL_NORMAL, LEVEL_HARD)
-LEVEL_LABELS = {LEVEL_EASY: "轻松", LEVEL_NORMAL: "普通", LEVEL_HARD: "困难"}
+#: Same three-phase shape as tic-tac-toe: lobby -> (waiting) -> playing.
+PHASE_WAITING = "waiting"
+PHASE_PLAYING = "playing"
+
+SPEC = lobby.GOMOKU
+
 #: Chance the AI ignores its best move. Gomoku is not a solved draw like
 #: tic-tac-toe, but a greedy scorer still beats a casual player every time.
 LEVEL_SLIP = {LEVEL_EASY: 0.55, LEVEL_NORMAL: 0.2, LEVEL_HARD: 0.0}
@@ -198,9 +208,12 @@ def new_state(mode: str, host_openid: str, level: str = LEVEL_NORMAL) -> dict[st
         "turn": BLACK,
         "players": players,
         "labels": {},
-        "level": level if level in AI_LEVELS else LEVEL_NORMAL,
+        "level": lobby.normalize_level(level),
         "last_move": -1,
         "session_id": "",
+        # PvP waits for a second player on a card, exactly like tic-tac-toe,
+        # so the board picture is only spent once the match can actually run.
+        "phase": PHASE_WAITING if mode == MODE_PVP else PHASE_PLAYING,
     }
 
 
@@ -213,6 +226,8 @@ def apply_move(state: dict[str, Any], index: int, actor_openid: str) -> str:
         return f"{format_coordinate(index)} 已经有子了"
     if is_over(board):
         return "对局已结束"
+    if state.get("phase") == PHASE_WAITING:
+        return "还在等对手加入，点「加入对战」入座"
 
     turn = state["turn"]
     if state["mode"] == MODE_PVP:
@@ -278,3 +293,13 @@ def move_hint(state: dict[str, Any]) -> str:
     last = state.get("last_move", -1)
     tail = f"（上一手 {format_coordinate(last)}）" if last >= 0 else ""
     return f"引用本图回复坐标落子，例如 H8{tail}"
+
+
+def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
+    """This game's entry card, built from the shared five-button layout."""
+    return lobby.build_lobby_card(SPEC, level)
+
+
+def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str, Any]:
+    host_openid = str((state.get("players") or {}).get(BLACK) or "")
+    return lobby.build_waiting_card(SPEC, host_label, host_openid)

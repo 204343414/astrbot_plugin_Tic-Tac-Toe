@@ -91,12 +91,27 @@ def test_ai_game_rejects_other_players():
     assert g.apply_move(state, g.parse_coordinate("H8"), "U2") == "这不是你的对局"
 
 
-def test_pvp_second_player_joins_by_moving():
+def test_pvp_waits_for_a_seated_opponent_before_any_move():
+    """No move is legal until someone takes the ⚪ seat on the waiting card.
+
+    Seating used to happen implicitly on the first move by a stranger. That is
+    now a card click, so the board picture is only spent on a real match --
+    and, more importantly, so the flow reads identically to tic-tac-toe.
+    """
     state = g.new_state(g.MODE_PVP, "U1")
+    assert state["phase"] == g.PHASE_WAITING
+    assert g.apply_move(state, g.parse_coordinate("H8"), "U1") == \
+        "还在等对手加入，点「加入对战」入座"
+
+    state["players"][g.WHITE] = "U2"
+    state["phase"] = g.PHASE_PLAYING
     assert g.apply_move(state, g.parse_coordinate("H8"), "U1") == ""
     assert g.apply_move(state, g.parse_coordinate("H9"), "U2") == ""
-    assert state["players"][g.WHITE] == "U2"
     assert g.apply_move(state, g.parse_coordinate("H10"), "U2") == "现在不是你的回合"
+
+
+def test_ai_mode_starts_playing_immediately():
+    assert g.new_state(g.MODE_AI, "U1")["phase"] == g.PHASE_PLAYING
 
 
 def test_last_move_is_tracked_for_the_marker():

@@ -23,21 +23,19 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .games import gomoku as gk
+from .games import lobby
+from .games import tictactoe as ttt
+from .games.lobby import AI_LEVELS, LEVEL_NORMAL
 from .games.session import AvatarCache, MatchRegistry
-from .game import (
+from .games.tictactoe import (
     AI,
-    AI_LEVELS,
     HUMAN,
-    LEVEL_LABELS,
-    LEVEL_NORMAL,
     MODE_AI,
     MODE_PVP,
     PHASE_PLAYING,
     apply_move,
     autoplay_forced_move,
     build_card,
-    build_lobby_card,
-    build_waiting_card,
     is_over,
     maybe_ai_move,
     new_state,
@@ -52,7 +50,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋与五子棋，支持群友对战与 AI 对战。",
-    "0.2.0",
+    "0.3.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -62,7 +60,9 @@ class TicTacToePlugin(Star):
         self.config = config or {}
         # origin -> game state. In-memory on purpose: an unfinished match is
         # not worth persisting across restarts, and the cards expire anyway.
-        self._levels: dict[str, str] = {}
+        # (origin, game key) -> difficulty. Per game on purpose: the two games
+        # are tuned separately and share nothing but the ladder's names.
+        self._levels: dict[tuple[str, str], str] = {}
         # Gomoku boards are pictures, so they need their own registry: one
         # match per group, an idle deadline, and avatars cached per match.
         self.idle_timeout = int((self.config or {}).get("idle_timeout_seconds", 90))
@@ -140,19 +140,33 @@ class TicTacToePlugin(Star):
             return
         ActionSpec = self._hub_module(hub, "action_registry").ActionSpec
 
-        specs = (
-            ("tictactoe.lobby", "🎮 井字棋", "打开井字棋大厅卡片，选择对战方式。", self._act_lobby),
-            ("gomoku.start_ai", "⚫ 五子棋：人机对战", "开始一局与 AI 的五子棋（图片棋盘）。", self._act_gomoku_ai),
-            ("gomoku.start_pvp", "⚫ 五子棋：群友对战", "开始一局群友对战的五子棋（图片棋盘）。", self._act_gomoku_pvp),
-            ("tictactoe.start_ai", "井字棋：人机对战", "由大厅卡片触发。", self._act_start_ai),
-            ("tictactoe.start_pvp", "井字棋：群友对战", "由大厅卡片触发。", self._act_start_pvp),
-            ("tictactoe.set_level", "井字棋：切换难度", "由大厅卡片触发。", self._act_set_level),
+        # Every game exposes the *same* five action ids under its own key, so
+        # the shared lobby card can be built from a GameSpec alone. Anything
+        # game-specific (a board button, an occupied-cell toast) stays out of
+        # this table.
+        specs = [
+            ("tictactoe.lobby", "🎮 井字棋", "打开井字棋卡片：人机 / 群友 / 三档难度。",
+             self._act_lobby_tictactoe),
+            ("gomoku.lobby", "⚫ 五子棋", "打开五子棋卡片：人机 / 群友 / 三档难度。",
+             self._act_lobby_gomoku),
+
+            ("tictactoe.start_ai", "井字棋：人机对战", "由井字棋卡片触发。", self._act_start_ai),
+            ("tictactoe.start_pvp", "井字棋：群友对战", "由井字棋卡片触发。", self._act_start_pvp),
+            ("tictactoe.set_level", "井字棋：切换难度", "由井字棋卡片触发。", self._act_set_level),
             ("tictactoe.join", "井字棋：加入对战", "由等待卡片触发。", self._act_join),
             ("tictactoe.move", "井字棋落子", "由棋盘按钮触发，请勿手动绑定。", self._act_move),
-            ("tictactoe.occupied", "井字棋占位提示", "点到已落子的格子，只回提示不发消息。", self._act_occupied),
+            ("tictactoe.occupied", "井字棋占位提示", "点到已落子的格子，只回提示不发消息。",
+             self._act_occupied),
             ("tictactoe.quit", "井字棋结束对局", "结束当前群的井字棋对局。", self._act_quit),
             ("tictactoe.restart", "井字棋再来一局", "以相同模式重新开局。", self._act_restart),
-        )
+
+            ("gomoku.start_ai", "五子棋：人机对战", "由五子棋卡片触发。", self._act_gomoku_ai),
+            ("gomoku.start_pvp", "五子棋：群友对战", "由五子棋卡片触发。", self._act_gomoku_pvp),
+            ("gomoku.set_level", "五子棋：切换难度", "由五子棋卡片触发。", self._act_set_level_gomoku),
+            ("gomoku.join", "五子棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘图。",
+             self._act_gomoku_join),
+            ("gomoku.quit", "五子棋结束对局", "结束当前群的五子棋对局。", self._act_quit),
+        ]
         for action_id, title, description, callback in specs:
             hub.actions.register(ActionSpec(
                 action_id=action_id,
@@ -218,26 +232,43 @@ class TicTacToePlugin(Star):
 
     # --- actions ------------------------------------------------------------
 
-    async def _act_lobby(self, context, params) -> int:
+    async def _act_lobby_tictactoe(self, context, params) -> int:
+        return await self._open_lobby(context, ttt.SPEC)
+
+    async def _act_lobby_gomoku(self, context, params) -> int:
+        return await self._open_lobby(context, gk.SPEC)
+
+    async def _open_lobby(self, context, spec) -> int:
+        """Re-send a game's entry card. Each game owns its own; neither is a
+        menu of the other."""
         try:
             await self._retire(context.origin)
             await self._send_card(
-                context, build_lobby_card(self._level(context.origin))
+                context,
+                lobby.build_lobby_card(spec, self._level(context.origin, spec)),
             )
         except Exception:
-            logger.exception("[TicTacToe] Failed to open lobby")
+            logger.exception("[Games] Failed to open the %s lobby", spec.key)
             return 1
         return 0
 
     async def _act_set_level(self, context, params) -> int:
+        return await self._set_level(context, ttt.SPEC, params)
+
+    async def _act_set_level_gomoku(self, context, params) -> int:
+        return await self._set_level(context, gk.SPEC, params)
+
+    async def _set_level(self, context, spec, params) -> int:
+        """Difficulty is remembered per group *and per game*:井字棋困难 and
+        五子棋轻松 are a perfectly reasonable pair."""
         level = str(params.get("level") or "")
         if level not in AI_LEVELS:
             return 1
-        self._levels[context.origin] = level
+        self._levels[(context.origin, spec.key)] = level
         try:
-            await self._send_card(context, build_lobby_card(level))
+            await self._send_card(context, lobby.build_lobby_card(spec, level))
         except Exception:
-            logger.exception("[TicTacToe] Failed to switch level")
+            logger.exception("[Games] Failed to switch the %s level", spec.key)
             return 1
         return 0
 
@@ -268,8 +299,8 @@ class TicTacToePlugin(Star):
         await self._send_board(context, state)
         return 0
 
-    def _level(self, origin: str) -> str:
-        return self._levels.get(origin, LEVEL_NORMAL)
+    def _level(self, origin: str, spec) -> str:
+        return self._levels.get((origin, spec.key), LEVEL_NORMAL)
 
     async def _start(self, context, mode: str) -> int:
         # One match per group across *all* games: boards are noisy and a second
@@ -279,12 +310,12 @@ class TicTacToePlugin(Star):
             logger.info("[Games] %s", busy)
             return 2
         state = new_state(mode, context.member_openid)
-        state["level"] = self._level(context.origin)
-        state["display_name"] = "井字棋"
+        state["level"] = self._level(context.origin, ttt.SPEC)
+        state["display_name"] = ttt.SPEC.title
         self._matches.start(context.origin, state)
         if mode == MODE_PVP:
             label = await self._label_of(context, context.member_openid)
-            await self._send_card(context, build_waiting_card(state, label))
+            await self._send_card(context, ttt.build_waiting_card(state, label))
             return 0
         await self._send_board(context, state)
         return 0
@@ -365,17 +396,49 @@ class TicTacToePlugin(Star):
         if busy:
             logger.info("[Gomoku] %s", busy)
             return 2  # 操作频繁：本群已有对局
-        state = gk.new_state(mode, context.member_openid, self._level(context.origin))
-        state["display_name"] = "五子棋"
+        state = gk.new_state(mode, context.member_openid,
+                             self._level(context.origin, gk.SPEC))
+        state["display_name"] = gk.SPEC.title
         self._matches.start(context.origin, state)
         self._avatars[context.origin] = AvatarCache()
         try:
+            if mode == gk.MODE_PVP:
+                # Same two-step as tic-tac-toe: seat the opponent on a card
+                # first, so the board picture is only spent on a real match.
+                label = await self._label_of(context, context.member_openid)
+                await self._send_card(context, gk.build_waiting_card(state, label))
+                return 0
             await self._send_gomoku_board(context.origin, state,
                                           client=context.client,
                                           interaction=context.interaction)
         except Exception:
             logger.exception("[Gomoku] Failed to open board")
             self._matches.pop(context.origin)
+            return 1
+        return 0
+
+    async def _act_gomoku_join(self, context, params) -> int:
+        """Second player takes the ⚪ seat, and only then is a board drawn.
+
+        Guarded here rather than by a one-shot button: the Hub consumes a
+        one-shot click *before* the game runs, so the host tapping it once
+        would burn the seat for everyone.
+        """
+        state = self._matches.get(context.origin)
+        if state is None or state.get("game") != "gomoku":
+            return 3
+        if state.get("phase") != gk.PHASE_WAITING:
+            return 3  # already started; the ⚪ seat is taken
+        if context.member_openid == state["players"].get(gk.BLACK, ""):
+            return 4  # toast only; the card stays usable for a real opponent
+        state["players"][gk.WHITE] = context.member_openid
+        state["phase"] = gk.PHASE_PLAYING
+        try:
+            await self._send_gomoku_board(context.origin, state,
+                                          client=context.client,
+                                          interaction=context.interaction)
+        except Exception:
+            logger.exception("[Gomoku] Failed to open board after join")
             return 1
         return 0
 
@@ -451,6 +514,7 @@ class TicTacToePlugin(Star):
 
     async def _retire(self, origin: str) -> None:
         state = self._matches.pop(origin)
+        self._avatars.pop(origin, None)
         hub = self._get_hub(quiet=True)
         if state and hub is not None and state.get("session_id"):
             try:
@@ -483,6 +547,8 @@ class TicTacToePlugin(Star):
         state = self._matches.get(origin)
         if state is None or state.get("game") != "gomoku":
             return
+        if state.get("phase") == gk.PHASE_WAITING:
+            return  # nobody has taken the ⚪ seat yet; there is no board to quote
         text = str(event.get_message_str() or "").strip()
         index = gk.parse_coordinate(text)
         if index < 0:
@@ -528,35 +594,10 @@ class TicTacToePlugin(Star):
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
     )
     @filter.command("五子棋", alias={"gomoku"})
-    async def gomoku_from_command(self, event: AstrMessageEvent, mode: str = ""):
-        """/五子棋 [对战] —— 开一局五子棋（图片棋盘，引用图片回坐标落子）。"""
-        event.stop_event()
-        origin = str(getattr(event, "unified_msg_origin", "") or "")
-        if "GroupMessage" not in origin:
-            yield event.plain_result("五子棋只能在 QQ 官方群里玩。")
-            return
-        busy = self._matches.busy_reason(origin)
-        if busy:
-            yield event.plain_result(busy)
-            return
-        if self._get_hub() is None:
-            yield event.plain_result("需要先安装并启用 QQ Official Hub 插件。")
-            return
-        chosen = gk.MODE_PVP if mode.strip() in ("对战", "pvp", "群友") else gk.MODE_AI
-        state = gk.new_state(chosen, str(event.get_sender_id() or ""),
-                             self._level(origin))
-        state["display_name"] = "五子棋"
-        self._matches.start(origin, state)
-        self._avatars[origin] = AvatarCache()
-        try:
-            await self._send_gomoku_board(
-                origin, state,
-                msg_id=str(event.message_obj.message_id or "") or None,
-            )
-        except Exception as exc:
-            self._matches.pop(origin)
-            logger.exception("[Gomoku] Failed to start")
-            yield event.plain_result(f"开局失败：{type(exc).__name__}: {exc}")
+    async def gomoku_from_command(self, event: AstrMessageEvent):
+        """/五子棋 —— 打开五子棋卡片，由按钮选择对战方式与难度。"""
+        async for result in self._lobby_from_command(event, gk.SPEC):
+            yield result
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL
@@ -626,12 +667,21 @@ class TicTacToePlugin(Star):
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
     )
     @filter.command("井字棋", alias={"tictactoe"})
-    async def start_from_command(self, event: AstrMessageEvent, mode: str = ""):
-        """/井字棋 —— 打开大厅卡片，由按钮选择对战方式。"""
+    async def start_from_command(self, event: AstrMessageEvent):
+        """/井字棋 —— 打开井字棋卡片，由按钮选择对战方式与难度。"""
+        async for result in self._lobby_from_command(event, ttt.SPEC):
+            yield result
+
+    async def _lobby_from_command(self, event: AstrMessageEvent, spec):
+        """Every game's slash command does the same thing: send its lobby.
+
+        Identical by construction rather than by copy-paste, so a third game
+        cannot drift into a different entry experience.
+        """
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         if "GroupMessage" not in origin:
-            yield event.plain_result("井字棋只能在 QQ 官方群里玩。")
+            yield event.plain_result(f"{spec.title}只能在 QQ 官方群里玩。")
             return
         hub = self._get_hub()
         if hub is None:
@@ -645,10 +695,10 @@ class TicTacToePlugin(Star):
         try:
             await hub.send_ephemeral_card(
                 origin,
-                build_lobby_card(self._level(origin)),
+                lobby.build_lobby_card(spec, self._level(origin, spec)),
                 msg_id=str(event.message_obj.message_id or "") or None,
                 initiator_openid=str(event.get_sender_id() or ""),
             )
         except Exception as exc:
-            logger.exception("[TicTacToe] Failed to send lobby")
+            logger.exception("[Games] Failed to send the %s lobby", spec.key)
             yield event.plain_result(f"发牌失败：{type(exc).__name__}: {exc}")

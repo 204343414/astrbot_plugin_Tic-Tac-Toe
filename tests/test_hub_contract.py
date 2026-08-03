@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from game import (  # noqa: E402
+from games.tictactoe import (  # noqa: E402
     MODE_AI, MODE_PVP, apply_move, build_card, is_over, maybe_ai_move, new_state,
 )
 
@@ -147,7 +147,7 @@ def test_lobby_does_not_inherit_a_previous_match_session():
     reuses the finished match's session id, cleanup kills it and the very next
     click reports "卡片不存在或已过期".
     """
-    import game
+    from games import tictactoe as game
     board = ep.bind_initiator(
         ep.validate_card(game.build_card(game.new_state(game.MODE_AI, "U1"))), "U1"
     )
@@ -160,7 +160,7 @@ def test_lobby_does_not_inherit_a_previous_match_session():
 
 def test_command_entry_retires_stale_match_before_sending():
     source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
-    entry = source[source.index("async def start_from_command"):]
+    entry = source[source.index("async def _lobby_from_command"):]
     assert "_retire(origin)" in entry.split("send_ephemeral_card")[0], (
         "开大厅前应先退掉残留对局"
     )
@@ -168,6 +168,6 @@ def test_command_entry_retires_stale_match_before_sending():
 
 def test_lobby_action_also_retires_first():
     source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
-    action = source[source.index("async def _act_lobby"):]
+    action = source[source.index("async def _open_lobby"):]
     action = action[: action.index("return 0")]
     assert "_retire" in action

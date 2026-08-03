@@ -7,8 +7,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from game import (  # noqa: E402
-    AI, AI_LEVELS, HUMAN, LEVEL_EASY, LEVEL_LABELS, LEVEL_SLIP, LEVEL_HARD,
+from games.lobby import AI_LEVELS, LEVEL_LABELS  # noqa: E402
+from games.tictactoe import (  # noqa: E402
+    AI, HUMAN, LEVEL_EASY, LEVEL_SLIP, LEVEL_HARD,
     LEVEL_NORMAL, MODE_AI, MODE_PVP, PHASE_PLAYING, PHASE_WAITING, ai_move,
     apply_move, autoplay_forced_move, build_card, build_lobby_card,
     build_waiting_card, is_full, is_over, maybe_ai_move, new_state,
