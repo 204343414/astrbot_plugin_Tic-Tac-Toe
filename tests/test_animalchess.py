@@ -423,9 +423,22 @@ def test_move_hint_mentions_the_last_move_and_disappears_at_the_end():
     state = bare()
     put(state, 0, 0, ac.RED, ac.LION)
     put(state, 0, 1, ac.BLUE, ac.CAT)
-    assert "鼠下" in ac.move_hint(state)
+    # The hint describes how moves are actually made. Since the board became
+    # a card, that is tapping buttons -- telling players to quote the picture
+    # would be instructions for a flow that no longer exists.
+    assert "点" in ac.move_hint(state) and "方向" in ac.move_hint(state)
     ac.apply_move(state, ac.LION, "右", "U1")
     assert ac.move_hint(state) == "", "终局不再提示走法"
+
+
+def test_the_hint_reports_the_last_move_including_a_capture():
+    state = bare()
+    put(state, 0, 0, ac.RED, ac.LION)
+    put(state, 0, 1, ac.BLUE, ac.CAT)
+    put(state, 6, 6, ac.BLUE, ac.ELEPHANT)   # keep the game alive
+    ac.apply_move(state, ac.LION, "右", "U1")
+    hint = ac.move_hint(state)
+    assert "狮右" in hint and "吃猫" in hint
 
 
 # --- lobby integration ------------------------------------------------------
@@ -552,3 +565,203 @@ def test_the_board_is_encoded_small_enough_for_chat():
     data = render.render_board(ac.new_state(ac.MODE_AI, "U1"))
     assert data[:3] == b"\xff\xd8\xff", "JPEG 才能把水彩底图压下来"
     assert len(data) < 400_000, f"棋盘图 {len(data)//1024} KB 偏大"
+
+
+# --- the board card ---------------------------------------------------------
+#
+# The board is a picture and the moves are buttons on the same message. What
+# makes that work is a set of QQ constraints that are easy to violate without
+# noticing, because violating them produces a card that still *sends*.
+
+def _card(state=None, url="https://x.trycloudflare.com/i/abc.png"):
+    state = state or ac.new_state(ac.MODE_AI, "HOST")
+    return ac.build_board_card(state, url)
+
+
+def test_the_picture_is_embedded_with_a_size_qq_accepts():
+    """QQ caps a Markdown image at 720x1080 and scales to the declared size.
+
+    Getting this wrong does not fail the send; it just renders badly, which
+    is exactly the kind of bug nobody files.
+    """
+    card = _card()
+    assert f"#{ac.CARD_IMAGE_WIDTH}px" in card["markdown"]
+    assert ac.CARD_IMAGE_WIDTH <= 720
+    assert ac.CARD_IMAGE_HEIGHT <= 1080
+    # The board art is 2135x1436; a card that silently changes the aspect
+    # ratio would squash every piece.
+    assert abs(ac.CARD_IMAGE_WIDTH / ac.CARD_IMAGE_HEIGHT - 2135 / 1436) < 0.01
+
+
+def test_every_button_inserts_text_rather_than_calling_back():
+    """type=1 callbacks are rate-limited and laggy, and produce no user
+    message -- which is what slowly starves the passive-reply window in a
+    game that is nothing but clicking."""
+    for row in _card()["rows"]:
+        for button in row:
+            assert button.get("insert_text"), f"{button['label']} 不是插入按钮"
+            assert not button.get("action_id")
+
+
+def test_every_button_quotes_the_card_it_sits_on():
+    """The move must arrive as a reply to the position it was played against;
+    that is the only thing separating it from chat."""
+    for row in _card()["rows"]:
+        for button in row:
+            assert button.get("reply") is True
+
+
+def test_no_row_exceeds_four_buttons():
+    """QQ allows five per row, but a fifth clips the labels -- observed in a
+    real group, not inferred from the documentation."""
+    for row in _card()["rows"]:
+        assert len(row) <= 4, f"一行 {len(row)} 个按钮会挤掉文字"
+
+
+def test_the_card_stays_within_qq_limits():
+    card = _card()
+    assert len(card["rows"]) <= 5
+    assert len(card["markdown"]) <= 4000
+
+
+def test_only_living_animals_get_a_button():
+    """A captured animal's button is a guaranteed rejection, and a rejection
+    costs a reply from a quota that is measured in single digits."""
+    state = ac.new_state(ac.MODE_AI, "HOST")
+    square = ac.find_piece(state, ac.RED, ac.RAT)
+    del state["pieces"][square]
+
+    labels = {b["label"] for row in _card(state)["rows"] for b in row}
+    assert ac.NAMES[ac.RAT] not in labels
+    assert ac.NAMES[ac.ELEPHANT] in labels
+
+
+def test_the_buttons_follow_the_side_to_move():
+    """Showing the mover their opponent's pieces would offer only illegal
+    moves -- and in PvP would leak whose turn it is not."""
+    state = ac.new_state(ac.MODE_PVP, "HOST")
+    state["players"][ac.BLUE] = "GUEST"
+    state["phase"] = ac.PHASE_PLAYING
+    blue_square = ac.find_piece(state, ac.BLUE, ac.CAT)
+    del state["pieces"][blue_square]
+
+    state["turn"] = ac.BLUE
+    blue_labels = {b["label"] for row in _card(state)["rows"] for b in row}
+    assert ac.NAMES[ac.CAT] not in blue_labels
+
+    state["turn"] = ac.RED
+    red_labels = {b["label"] for row in _card(state)["rows"] for b in row}
+    assert ac.NAMES[ac.CAT] in red_labels, "红方的猫还活着，按钮不该跟着蓝方消失"
+
+
+def test_animal_order_does_not_reshuffle_as_pieces_die():
+    """A button that moves under your finger between turns is worse than one
+    that disappears, so ordering is by rank and never by dict order."""
+    state = ac.new_state(ac.MODE_AI, "HOST")
+    before = [b["label"] for row in _card(state)["rows"][:-1] for b in row]
+    del state["pieces"][ac.find_piece(state, ac.RED, ac.DOG)]
+    after = [b["label"] for row in _card(state)["rows"][:-1] for b in row]
+    assert after == [x for x in before if x != ac.NAMES[ac.DOG]]
+
+
+def test_the_four_directions_are_always_offered():
+    card = _card()
+    directions = {b["insert_text"] for b in card["rows"][-1]}
+    assert directions == set(ac.DIRECTIONS)
+
+
+def test_a_tapped_move_parses_back_into_a_real_move():
+    """The round trip is the whole feature: Tencent inserts a space after each
+    tap, so what actually gets sent is 「鼠 下」rather than 「鼠下」. If
+    parse_move rejected that, every button on the card would be dead.
+    """
+    card = _card()
+    animal_button = card["rows"][0][0]
+    direction_button = card["rows"][-1][1]
+    typed = f"{animal_button['insert_text']} {direction_button['insert_text']}"
+    assert ac.parse_move(typed) is not None, f"{typed!r} 解析不出走法"
+
+
+def test_every_animal_button_round_trips():
+    state = ac.new_state(ac.MODE_AI, "HOST")
+    card = _card(state)
+    directions = [b["insert_text"] for b in card["rows"][-1]]
+    for row in card["rows"][:-1]:
+        for button in row:
+            for direction in directions:
+                parsed = ac.parse_move(f"{button['insert_text']} {direction}")
+                assert parsed is not None, f"{button['label']}{direction} 解析失败"
+                assert ac.NAMES[parsed[0]] == button["label"]
+
+
+def test_a_finished_game_drops_the_how_to_line_but_keeps_the_picture():
+    state = ac.new_state(ac.MODE_AI, "HOST")
+    state["winner"] = ac.RED
+    state["win_reason"] = "den"
+    card = _card(state)
+    assert "然后发送" not in card["markdown"]
+    assert "![" in card["markdown"]
+
+
+def test_the_card_is_not_one_shot():
+    """Nothing here reaches the server, so there is no click for one_shot to
+    consume -- setting it would only make the card look used."""
+    assert _card()["one_shot"] is False
+
+
+def test_the_card_does_not_repeat_what_the_picture_already_says():
+    """Status and hint belong in exactly one place.
+
+    They are drawn into the image for a bare image message, which has no
+    caption. A card has a Markdown body, so doing both prints everything
+    twice -- the same duplication the in-image banner was added to avoid.
+    """
+    render = pytest.importorskip(
+        "games.animalchess_render", reason="需要 Pillow")
+    state = ac.new_state(ac.MODE_AI, "HOST")
+    with_banner = render.render_board(state, banner=True)
+    without = render.render_board(state, banner=False)
+    assert with_banner != without, "banner=False 必须真的不画横幅"
+
+
+def test_a_whole_game_can_be_played_using_only_the_card_buttons():
+    """The end-to-end guarantee: nothing on the card is unreachable.
+
+    Each turn taps an animal button and a direction button, joins them the
+    way Tencent does (it appends a space after each insertion) and feeds the
+    result back through the same parser the chat handler uses. If any button
+    combination failed to parse, or the card ever offered a piece that is no
+    longer on the board, the game would stall with no way forward.
+    """
+    import random
+
+    random.seed(7)
+    state = ac.new_state(ac.MODE_AI, "HOST", ac.LEVEL_NORMAL)
+    turns = 0
+    while not ac.is_over(state) and turns < 120:
+        card = ac.build_board_card(state, "https://x/i/a.png")
+        animals = [b for row in card["rows"][:-1] for b in row]
+        directions = card["rows"][-1]
+
+        # The card must never advertise a captured piece.
+        alive = {animal for (owner, animal) in state["pieces"].values()
+                 if owner == state["turn"]}
+        assert {b["insert_text"] for b in animals} == {
+            ac.NAMES[a] for a in alive}
+
+        played = False
+        for _ in range(60):
+            typed = (f"{random.choice(animals)['insert_text']} "
+                     f"{random.choice(directions)['insert_text']}")
+            parsed = ac.parse_move(typed)
+            assert parsed is not None, f"按钮组合解析失败: {typed!r}"
+            if not ac.apply_move(state, parsed[0], parsed[1], "HOST"):
+                played = True
+                break
+        assert played, "卡片上找不到任何合法走法，对局卡死"
+        turns += 1
+        if not ac.is_over(state):
+            ac.maybe_ai_move(state)
+
+    assert ac.is_over(state), "对局应当分出胜负"
+    assert state["winner"] in (ac.RED, ac.BLUE)

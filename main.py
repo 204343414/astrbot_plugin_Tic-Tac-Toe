@@ -52,7 +52,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.7.0",
+    "0.8.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -501,6 +501,30 @@ class TicTacToePlugin(Star):
         if busy:
             logger.info("[AnimalChess] %s", busy)
             return 2  # 操作频繁：本群已有对局
+        # Checked before the match exists: the board *is* a card here, so a
+        # game that cannot draw one is a game that cannot be played at all.
+        reason = await self._image_host_or_reason()
+        if reason:
+            # A toast says only "操作失败", which sends people to the logs for
+            # something they can fix in the config. Spell it out in the group.
+            logger.warning("[AnimalChess] Refusing to start: %s", reason)
+            try:
+                await self._send_card(context, {
+                    "id": "animalchess_unavailable",
+                    "markdown": "\n".join([
+                        "# 斗兽棋暂时开不了",
+                        f"**{reason}**",
+                        "",
+                        "斗兽棋的棋盘是一张带按钮的卡片，需要 Hub 图床把图片"
+                        "发布到公网，所以图床不通就没法开局。",
+                        "管理员可发送 `/诊断` 查看图床状态。",
+                    ]),
+                    "rows": [],
+                    "ttl_seconds": 600,
+                }, session_id=self._ui_session(context.origin, ach.SPEC))
+            except Exception:
+                logger.exception("[AnimalChess] Failed to explain the refusal")
+            return 1
         state = ach.new_state(mode, context.member_openid,
                               self._level(context.origin, ach.SPEC))
         state["display_name"] = ach.SPEC.title
@@ -513,9 +537,9 @@ class TicTacToePlugin(Star):
                     session_id=self._ui_session(context.origin, ach.SPEC),
                 )
                 return 0
-            await self._send_picture_board(context.origin, state,
-                                           client=context.client,
-                                           interaction=context.interaction)
+            await self._send_animalchess_card(context.origin, state,
+                                              client=context.client,
+                                              interaction=context.interaction)
         except Exception:
             logger.exception("[AnimalChess] Failed to open board")
             self._matches.pop(context.origin)
@@ -534,9 +558,9 @@ class TicTacToePlugin(Star):
         state["players"][ach.BLUE] = context.member_openid
         state["phase"] = ach.PHASE_PLAYING
         try:
-            await self._send_picture_board(context.origin, state,
-                                           client=context.client,
-                                           interaction=context.interaction)
+            await self._send_animalchess_card(context.origin, state,
+                                              client=context.client,
+                                              interaction=context.interaction)
         except Exception:
             logger.exception("[AnimalChess] Failed to open board after join")
             return 1
@@ -634,6 +658,84 @@ class TicTacToePlugin(Star):
         # group with no board at all.
         if previous_id and previous_id != sent_id:
             await self._recall_quietly(origin, previous_id, previous_at, client)
+
+    async def _image_host_or_reason(self) -> str:
+        """"" when cards can carry pictures, otherwise why they cannot.
+
+        Animal chess has no non-card mode, so this is checked before a match
+        is created rather than after -- refusing to start is recoverable,
+        while a half-started game with no board is not.
+        """
+        hub = self._get_hub(quiet=True)
+        if hub is None:
+            return "QQ Official Hub 未安装或未启用"
+        checker = getattr(hub, "image_host_reachable", None)
+        if checker is None:
+            return "Hub 版本过旧（需要 v0.21.0+ 的图床自愈接口），请更新"
+        try:
+            if await checker():
+                return ""
+        except Exception as exc:
+            return f"图床检查失败：{type(exc).__name__}: {exc}"
+        if not getattr(hub, "image_host_enabled", False):
+            return "Hub 图床未开启：配置里打开 image_host_enabled"
+        return "图床拿不到公网地址：确认 cloudflared 正在运行"
+
+    async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
+                                     client=None, interaction=None,
+                                     msg_id: str | None = None) -> None:
+        """Send the board as a card: picture and move buttons in one message.
+
+        Requires the Hub's image host, because QQ will not accept rich media
+        and a keyboard in the same message -- the picture has to arrive as a
+        Markdown image, which needs a public URL. There is no degraded mode
+        on purpose: silently falling back to the old quote-a-picture flow
+        would mean the buttons vanish with no explanation, and "the feature
+        sometimes exists" is harder to report than "it is off".
+        """
+        from .games import animalchess_render as ar
+
+        hub = self._get_hub()
+        if hub is None:
+            raise RuntimeError("QQ Official Hub 不可用")
+        await self._refresh_labels_from_origin(origin, state)
+
+        # No banner: the card's Markdown already states the turn and the
+        # hint, and drawing them into the picture too printed both twice.
+        image = ar.render_board(state, banner=False)
+        # One slot per group: publishing the next turn's board retires this
+        # one, so a long game leaves a single file rather than one per move.
+        url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
+
+        card = ach.build_board_card(state, url)
+        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
+        await hub.send_ephemeral_card(
+            origin, card,
+            client=client,
+            session_id=self._ui_session(origin, ach.SPEC),
+            event_id=passive_event_id(interaction) if interaction is not None else None,
+            msg_id=msg_id,
+            initiator_openid="",
+            clicker_header="",
+        )
+        self._matches.touch(state)
+
+    async def _refresh_labels_from_origin(self, origin: str,
+                                          state: dict[str, Any]) -> None:
+        """Resolve seat OpenIDs to nicknames without needing a click context."""
+        hub = self._get_hub(quiet=True)
+        book = getattr(hub, "identities", None) if hub else None
+        if book is None:
+            return
+        labels = {}
+        for mark, openid in (state.get("players") or {}).items():
+            if not openid:
+                continue
+            try:
+                labels[mark] = await book.label_for(origin, openid)
+            except Exception:
+                pass
+        state["labels"] = labels
 
     async def _recall_quietly(self, origin: str, message_id: str,
                               sent_at: float | None, client=None) -> None:
@@ -778,15 +880,14 @@ class TicTacToePlugin(Star):
             return
         animal, direction = parsed
 
-        board_id = str(state.get("board_msg_id") or "")
-        quoted = quoted_message_ids(event)
-        if not quoted:
-            return          # saying "鼠下" in conversation is not a move
-        if board_id and board_id not in quoted:
-            logger.info(
-                "[AnimalChess] Quoted id %s does not match the board id %s; "
-                "accepting the move anyway", ",".join(quoted), board_id,
-            )
+        # The board buttons carry reply=True, so a move composed by tapping
+        # always arrives quoting the board card. A quote is still required --
+        # it is what separates a move from someone saying 鼠下 in conversation
+        # -- but the id is no longer matched: the card is replaced every turn,
+        # and rejecting a move for quoting the turn-old card would punish the
+        # player for the redraw rather than for anything they did.
+        if not quoted_message_ids(event):
+            return
         event.stop_event()
 
         actor = str(event.get_sender_id() or "")
@@ -798,15 +899,15 @@ class TicTacToePlugin(Star):
             ach.maybe_ai_move(state)
         self._matches.touch(state)
         try:
-            await self._send_picture_board(
+            await self._send_animalchess_card(
                 origin, state,
                 msg_id=str(event.message_obj.message_id or "") or None,
             )
         except Exception as exc:
             logger.exception("[AnimalChess] Failed to refresh board")
             yield event.plain_result(
-                f"走棋已记录（{ach.NAMES[animal]}{direction}），但棋盘图没发出来："
-                f"{self._describe(exc)}\n发送 /棋盘 可以重新出图。"
+                f"走棋已记录（{ach.NAMES[animal]}{direction}），但棋盘卡没发出来："
+                f"{self._describe(exc)}\n发送 /棋盘 可以重新出卡。"
             )
             return
         if ach.is_over(state):
@@ -842,13 +943,17 @@ class TicTacToePlugin(Star):
         if state.get("phase") == gk.PHASE_WAITING:
             yield event.plain_result("对局还在等对手加入，尚未开始。")
             return
+        msg_id = str(event.message_obj.message_id or "") or None
         try:
-            await self._send_picture_board(
-                origin, state,
-                msg_id=str(event.message_obj.message_id or "") or None,
-            )
+            # Animal chess draws a card, gomoku an image message. Dispatching
+            # on the game rather than always doing the same thing is what
+            # keeps /棋盘 an actual redraw of what players are looking at.
+            if state.get("game") == "animalchess":
+                await self._send_animalchess_card(origin, state, msg_id=msg_id)
+            else:
+                await self._send_picture_board(origin, state, msg_id=msg_id)
         except Exception as exc:
-            logger.exception("[Gomoku] Failed to redraw board")
+            logger.exception("[Games] Failed to redraw board")
             yield event.plain_result(f"出图失败：{self._describe(exc)}")
 
     @filter.platform_adapter_type(

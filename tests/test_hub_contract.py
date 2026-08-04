@@ -235,3 +235,113 @@ def test_an_explicit_quit_still_retires_the_cards():
     quit_handler = quit_handler[: quit_handler.index("async def _act_restart")]
     assert "_retire(context.origin)" in quit_handler
     assert "keep_cards" not in quit_handler
+
+
+# --- the animal chess board card --------------------------------------------
+#
+# This card is the first one that carries a picture *and* buttons, which is
+# the combination QQ refuses for rich media. It only works because the image
+# arrives as a hosted Markdown link, so the Hub's validator is the right place
+# to prove the shape is legal rather than merely plausible.
+
+from games import animalchess as ac  # noqa: E402
+
+BOARD_URL = "https://favor-prisoner.trycloudflare.com/i/tok3n.png"
+
+
+def test_every_animalchess_board_passes_hub_validation():
+    """Play a real game, validating the card at every single turn.
+
+    A card that fails validation mid-game is far worse than one that fails at
+    the start: the match is already live, and players lose a position they
+    cannot get back.
+    """
+    rng = random.Random(11)
+    state = ac.new_state(ac.MODE_AI, "A")
+    for _ in range(60):
+        ep.validate_card(ac.build_board_card(state, BOARD_URL))
+        if ac.is_over(state):
+            break
+        moves = ac.legal_moves(state, state["turn"])
+        if not moves:
+            break
+        animal = rng.choice(sorted(moves))
+        direction = rng.choice(moves[animal])[0]
+        ac.apply_move(state, animal, direction, "A")
+        if not ac.is_over(state):
+            ac.maybe_ai_move(state)
+    ep.validate_card(ac.build_board_card(state, BOARD_URL))
+
+
+def test_the_hub_keeps_the_reply_flag_on_every_board_button():
+    """``reply`` is what ties a move to the position it was played against.
+
+    It is set on the card, but the Hub is what renders the QQ payload -- so a
+    Hub that dropped the flag would leave the game silently unplayable, since
+    the move handler requires a quote.
+    """
+    card = ep.validate_card(ac.build_board_card(
+        ac.new_state(ac.MODE_AI, "A"), BOARD_URL))
+    for row in card["rows"]:
+        for button in row:
+            assert button["reply"] is True
+
+
+def test_board_buttons_render_as_qq_type_2_actions():
+    """type=2 appends to the input box without sending. If these came out as
+    type=1 the game would become a stream of rate-limited callbacks, which is
+    the thing the design deliberately avoids."""
+    card = ep.validate_card(ac.build_board_card(
+        ac.new_state(ac.MODE_AI, "A"), BOARD_URL))
+    rows = ep.to_keyboard_rows(card, "nonce123")
+    actions = [b["action"] for row in rows for b in row["buttons"]]
+    assert actions, "棋盘卡必须有按钮"
+    for action in actions:
+        assert action["type"] == 2
+        assert action["enter"] is False, "点了不能直接发送，要留给玩家确认"
+        assert action["reply"] is True
+
+
+def test_a_board_with_only_one_piece_left_still_makes_a_valid_card():
+    """The endgame is where the animal row is shortest, and an empty row is
+    the shape most likely to slip through untested."""
+    state = ac.new_state(ac.MODE_AI, "A")
+    keep = ac.find_piece(state, ac.RED, ac.LION)
+    state["pieces"] = {
+        square: piece for square, piece in state["pieces"].items()
+        if square == keep or piece[0] == ac.BLUE
+    }
+    card = ep.validate_card(ac.build_board_card(state, BOARD_URL))
+    animal_rows = card["rows"][:-1]
+    assert sum(len(r) for r in animal_rows) == 1
+
+
+def test_no_card_in_this_plugin_ships_an_id_the_hub_would_reject():
+    """CARD_ID_RE allows only [A-Za-z0-9_.:-].
+
+    A Chinese button id looks perfectly reasonable next to a Chinese label,
+    passes every test written against the game module alone, and then throws
+    at send time -- which is how ``dir_上`` reached a card. Sweep every card
+    this plugin builds rather than trusting each one to remember.
+    """
+    from games import gomoku as gk
+    from games import lobby
+    from games import tictactoe as ttt
+
+    cards = [
+        ttt.build_card(ttt.new_state(MODE_AI, "A")),
+        ac.build_board_card(ac.new_state(ac.MODE_AI, "A"), BOARD_URL),
+        ac.build_lobby_card(),
+        ac.build_waiting_card(ac.new_state(ac.MODE_PVP, "A"), "阿甲"),
+        gk.build_lobby_card(),
+        gk.build_waiting_card(gk.new_state(MODE_PVP, "A"), "阿甲"),
+        lobby.build_lobby_card(ttt.SPEC),
+        lobby.build_waiting_card(ttt.SPEC, "阿甲", "A"),
+    ]
+    for card in cards:
+        assert ep.CARD_ID_RE.fullmatch(card["id"]), card["id"]
+        for row in card["rows"]:
+            for button in row:
+                given = button.get("id", "")
+                assert ep.CARD_ID_RE.fullmatch(given), (
+                    f"{card['id']} 的按钮 ID {given!r} 会被 Hub 拒绝")

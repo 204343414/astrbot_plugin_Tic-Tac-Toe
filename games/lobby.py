@@ -138,7 +138,7 @@ TICTACTOE = GameSpec(
 ANIMALCHESS = GameSpec(
     key="animalchess",
     title="斗兽棋",
-    how_to="棋盘是图片：**引用棋盘图回复「动物+方向」**（如 鼠下）走棋，攻入兽穴即胜。",
+    how_to="棋盘是一张带按钮的卡片：**先点动物再点方向，然后发送**（如 鼠 下），攻入兽穴即胜。",
     host_mark="🔴",
     guest_mark="🔵",
 )

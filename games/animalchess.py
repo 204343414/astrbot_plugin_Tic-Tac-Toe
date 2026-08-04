@@ -631,7 +631,7 @@ def move_hint(state: dict[str, Any]) -> str:
     if last:
         eaten = f"吃{NAMES[last['captured']]}" if last.get("captured") else ""
         tail = f"（上一手 {NAMES[last['animal']]}{last['direction']}{eaten}）"
-    return f"引用本图回复「动物+方向」走棋，例如 鼠下{tail}"
+    return f"点卡片上的动物+方向，然后发送{tail}"
 
 
 def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
@@ -642,3 +642,97 @@ def build_lobby_card(level: str = LEVEL_NORMAL) -> dict[str, Any]:
 def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str, Any]:
     host_openid = str((state.get("players") or {}).get(RED) or "")
     return lobby.build_waiting_card(SPEC, host_label, host_openid)
+
+
+# --- picture card -----------------------------------------------------------
+#
+# The board is a picture and the moves are buttons on the same message. That
+# only became possible once the Hub could embed a hosted image in a Markdown
+# card: QQ refuses rich media and a keyboard in one message, so before this
+# the board had to be a separate image message that players quoted by hand.
+
+#: QQ scales a Markdown image to the size declared in the link. The board is
+#: 2135x1436, and 720 is the documented maximum width.
+CARD_IMAGE_WIDTH = 720
+CARD_IMAGE_HEIGHT = round(CARD_IMAGE_WIDTH * 1436 / 2135)   # keep the shape
+
+
+def movable_animals(state: dict[str, Any], side: str = "") -> list[str]:
+    """Which of ``side``'s animals are still on the board, weakest first.
+
+    Only living pieces get a button: a captured animal's button would be a
+    guaranteed rejection, and rejections cost a reply the group's quota can
+    ill afford. Ordered by rank so the row does not reshuffle as pieces die --
+    a button that moves under your finger between turns is worse than one
+    that disappears.
+    """
+    side = side or state["turn"]
+    alive = {animal for (owner, animal) in state["pieces"].values() if owner == side}
+    return [animal for animal in ANIMALS if animal in alive]
+
+
+def build_board_card(state: dict[str, Any], image_url: str) -> dict[str, Any]:
+    """The board as one card: picture, animals, directions.
+
+    Buttons are **type=2**: tapping appends text to the input box without
+    sending, so a move is composed as 「鼠」+「下」and sent deliberately.
+    That matters for three separate reasons:
+
+    * type=1 callbacks are rate-limited and laggy, which a turn-based game
+      taps constantly;
+    * the sent message is a real user message, which refreshes the passive
+      reply window -- a game driven purely by callbacks slowly starves;
+    * a misclick is fixable before sending, because nothing is sent yet.
+
+    ``reply`` makes the composed message quote this card, which is how the
+    move is tied to the position it was played against.
+    """
+    side = state["turn"]
+    animals = movable_animals(state, side)
+    rows: list[list[dict[str, Any]]] = []
+    # Four per row: QQ allows five, but a fifth squeezes the labels until the
+    # text is clipped -- verified in the group, not assumed from the docs.
+    for start in range(0, len(animals), 4):
+        rows.append([
+            {
+                "id": f"pick_{animal}",
+                "label": NAMES[animal],
+                # Tencent appends a space after inserted text, so the message
+                # ends up as "鼠 下" -- which parse_move already tolerates.
+                "insert_text": NAMES[animal],
+                "reply": True,
+                "style": 0,
+            }
+            for animal in animals[start:start + 4]
+        ])
+    rows.append([
+        # ASCII ids: the Hub's CARD_ID_RE only accepts [A-Za-z0-9_.:-], so a
+        # Chinese id like "dir_上" is rejected outright. The label and the
+        # inserted text stay Chinese -- only the identifier is transliterated.
+        {"id": f"dir_{slug}", "label": label, "insert_text": name,
+         "reply": True, "style": 1}
+        for name, slug, label in (("上", "up", "⬆️ 上"),
+                                  ("下", "down", "⬇️ 下"),
+                                  ("左", "left", "⬅️ 左"),
+                                  ("右", "right", "➡️ 右"))
+    ])
+
+    lines = [
+        f"**{status_text(state)}**",
+        f"![棋盘 #{CARD_IMAGE_WIDTH}px #{CARD_IMAGE_HEIGHT}px]({image_url})",
+    ]
+    last = state.get("last_move")
+    if last:
+        eaten = f" 吃{NAMES[last['captured']]}" if last.get("captured") else ""
+        lines.append(f"上一手：{NAMES[last['animal']]}{last['direction']}{eaten}")
+    if not is_over(state):
+        lines.append("先点动物再点方向，然后发送。")
+    return {
+        "id": "animalchess_board",
+        "markdown": "\n".join(lines),
+        "rows": rows,
+        # Every button is type=2 and never reaches the server, so there is
+        # nothing for one_shot to consume; the card is replaced each turn.
+        "one_shot": False,
+        "ttl_seconds": 3600,
+    }

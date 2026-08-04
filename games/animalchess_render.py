@@ -230,11 +230,14 @@ def _draw_piece(image: Image.Image, draw: ImageDraw.ImageDraw,
                      outline=HIGHLIGHT, width=round(radius * 0.14))
 
 
-def render_board(state: dict[str, Any]) -> bytes:
-    """Draw the current position and return PNG bytes.
+def render_board(state: dict[str, Any], banner: bool = True) -> bytes:
+    """Draw the current position and return JPEG bytes.
 
-    The move hint is drawn *into* the picture: the image message carries no
-    caption, so putting it in the body would print it twice.
+    ``banner`` draws the status and move hint *into* the picture. That is
+    right for a bare image message, which has no caption -- and wrong for a
+    card, whose Markdown body already carries both. Printing them in the
+    image as well was the exact duplication the banner exists to avoid, just
+    in the other direction.
     """
     image = _load_board().copy()
     draw = ImageDraw.Draw(image)
@@ -245,7 +248,8 @@ def render_board(state: dict[str, Any]) -> bytes:
         _draw_piece(image, draw, row, col, side, animal,
                     highlight=(row, col) == last_to)
 
-    _draw_banner(image, draw, state)
+    if banner:
+        _draw_banner(image, draw, state)
 
     if SCALE != 1.0:
         image = image.resize(
