@@ -52,7 +52,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.8.0",
+    "0.8.1",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -669,17 +669,25 @@ class TicTacToePlugin(Star):
         hub = self._get_hub(quiet=True)
         if hub is None:
             return "QQ Official Hub 未安装或未启用"
+        # Ask the Hub *why*, rather than testing a boolean and guessing.
+        # Guessing produced "拿不到公网地址" for what was really a port
+        # clash, and that wrong answer cost an evening of looking at
+        # cloudflared while cloudflared was fine.
+        explain = getattr(hub, "image_host_problem", None)
+        if explain is not None:
+            try:
+                return await explain()
+            except Exception as exc:
+                return f"图床检查失败：{type(exc).__name__}: {exc}"
         checker = getattr(hub, "image_host_reachable", None)
         if checker is None:
-            return "Hub 版本过旧（需要 v0.21.0+ 的图床自愈接口），请更新"
+            return "Hub 版本过旧（需要 v0.23.0+ 的图床诊断接口），请更新"
         try:
             if await checker():
                 return ""
         except Exception as exc:
             return f"图床检查失败：{type(exc).__name__}: {exc}"
-        if not getattr(hub, "image_host_enabled", False):
-            return "Hub 图床未开启：配置里打开 image_host_enabled"
-        return "图床拿不到公网地址：确认 cloudflared 正在运行"
+        return "图床不可用；在群里发送 /诊断 查看具体原因"
 
     async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
                                      client=None, interaction=None,
