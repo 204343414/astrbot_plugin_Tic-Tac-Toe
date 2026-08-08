@@ -52,7 +52,7 @@ OWNER = PLUGIN_NAME
     PLUGIN_NAME,
     "204343414",
     "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.8.1",
+    "0.8.2",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):

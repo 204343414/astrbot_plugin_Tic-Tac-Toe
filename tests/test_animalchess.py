@@ -6,6 +6,7 @@ the enemy's trap can be eaten by anything. Each is pinned separately, because
 "the AI played an illegal move" is only debuggable if the rule it broke has a
 name.
 """
+import random
 import sys
 from pathlib import Path
 
@@ -765,3 +766,77 @@ def test_a_whole_game_can_be_played_using_only_the_card_buttons():
 
     assert ac.is_over(state), "对局应当分出胜负"
     assert state["winner"] in (ac.RED, ac.BLUE)
+
+
+# --- what the evaluation deliberately does NOT do ---------------------------
+#
+# These pin down conclusions that came from measurement, not taste. Each one
+# describes an "obvious improvement" that was implemented, benchmarked, and
+# removed because the numbers said no. Without them written down, the same
+# idea gets reinvented every few months and re-tested by hand.
+
+def test_the_den_is_worth_far_more_than_every_piece_combined():
+    """'Reaching the den should score like capturing everything' understates
+    it: the den already outweighs the entire board by orders of magnitude, so
+    the AI can never be tempted to farm captures instead of winning.
+    """
+    whole_board = sum(ac.VALUE.values())
+    assert ac.WIN_SCORE > whole_board * 100
+
+
+def test_capture_value_rises_with_the_animal():
+    """Bigger prey is worth more, smaller loss is cheaper -- both directions
+    come from the same table."""
+    ordered = [ac.CAT, ac.DOG, ac.WOLF, ac.LEOPARD, ac.TIGER, ac.LION, ac.ELEPHANT]
+    values = [ac.VALUE[a] for a in ordered]
+    assert values == sorted(values), "价值必须随体型单调递增"
+
+
+def test_the_rat_is_valued_well_above_its_rank():
+    """Rank 1, but it takes the elephant and blocks both river jumps.
+
+    Scoring it as the weakest piece would have the AI trading it away
+    cheaply, which loses the game later. Note it is deliberately *not* equal
+    to the elephant: that variant was played 24 games head to head and went
+    13:11, i.e. indistinguishable from noise, so the change was not made.
+    """
+    assert ac.VALUE[ac.RAT] > ac.VALUE[ac.LEOPARD]
+    assert ac.VALUE[ac.RAT] < ac.VALUE[ac.ELEPHANT]
+
+
+def test_a_faster_win_outscores_a_slower_one():
+    """Without the depth discount every winning line ties at WIN_SCORE, the
+    search cannot tell a mate in one from a mate in three, and the AI paces
+    around next to the den. That was a real, observed bug."""
+    # Two winning positions differing only in distance to the den.
+    near = _win_in(1)
+    far = _win_in(3)
+    assert near > far, "一步入穴必须比三步入穴分高"
+
+
+def _win_in(steps: int) -> int:
+    """Score a position where RED's lion is ``steps`` away from the den."""
+    state = bare()
+    den_row, den_col = ac.DENS[ac.BLUE]
+    put(state, den_row, den_col - steps, ac.RED, ac.LION)
+    put(state, 0, 0, ac.BLUE, ac.CAT)
+    return ac._search(state, ac.RED, steps + 1, -ac.WIN_SCORE * 2,
+                      ac.WIN_SCORE * 2, True)
+
+
+def test_hard_answers_fast_enough_for_a_chat_game():
+    """A move nobody waits for is a move nobody plays.
+
+    This is a regression guard with history: making the evaluation
+    terrain-aware once pushed the opening from 0.7s to 17.4s, because a
+    smoother score gives alpha-beta less to cut. Speed is a feature here.
+    """
+    import time
+
+    state = ac.new_state(ac.MODE_PVP, "A")
+    state["players"][ac.BLUE] = "B"
+    state["phase"] = ac.PHASE_PLAYING
+    started = time.perf_counter()
+    ac.ai_move(state, ac.RED, random.Random(1), ac.LEVEL_HARD)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 5.0, f"困难档开局用了 {elapsed:.1f}s，聊天里等不起"
