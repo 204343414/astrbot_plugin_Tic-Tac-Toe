@@ -16,6 +16,9 @@ Design constraints that shaped it (see the Hub's docs/EPHEMERAL_CARDS.md):
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import random
 import time
 from typing import Any
 
@@ -601,6 +604,145 @@ class TicTacToePlugin(Star):
         except Exception:
             return ""
 
+    @staticmethod
+    def _bytes_hashes(data: bytes) -> tuple[str, str, str]:
+        md5 = hashlib.md5(data).hexdigest()
+        sha1 = hashlib.sha1(data).hexdigest()
+        md5_10m = hashlib.md5(data[:10_002_432]).hexdigest()
+        return md5, sha1, md5_10m
+
+    async def _send_qq_chunked_image(
+        self,
+        origin: str,
+        image_bytes: bytes,
+        file_name: str = "board.png",
+        client: Any = None,
+        event_id: str | None = None,
+        msg_id: str | None = None,
+    ) -> str:
+        """使用 QQ 官方原生分片上传协议发送棋盘大图，返回发送的消息 ID。"""
+        import aiohttp
+        from botpy.http import Route
+        from botpy.types.message import Media
+
+        group_openid = origin.split(":")[-1]
+        platform_name = origin.split(":", 1)[0]
+        platform = self.context.get_platform_inst(platform_name)
+        bot = getattr(platform, "bot", None) or client
+        api = getattr(bot, "api", None) or getattr(client, "api", None)
+        http_client = getattr(api, "_http", None)
+        if not http_client:
+            raise RuntimeError("无法获取 QQ Bot HTTP 客户端")
+
+        file_size = len(image_bytes)
+        md5, sha1, md5_10m = self._bytes_hashes(image_bytes)
+
+        prepare_path = "/v2/groups/{group_id}/upload_prepare"
+        finish_path = "/v2/groups/{group_id}/upload_part_finish"
+        files_path = "/v2/groups/{group_openid}/files"
+        prepare_kwargs = {"group_id": group_openid}
+        finish_kwargs = {"group_id": group_openid}
+        files_kwargs = {"group_openid": group_openid}
+
+        prepare_payload = {
+            "file_type": 1,
+            "file_size": str(file_size),
+            "file_name": file_name,
+            "md5": md5,
+            "sha1": sha1,
+            "md5_10m": md5_10m,
+        }
+        prepare = await http_client.request(
+            Route("POST", prepare_path, **prepare_kwargs), json=prepare_payload
+        )
+        if not isinstance(prepare, dict) or not prepare.get("upload_id"):
+            raise RuntimeError(f"预上传响应异常: {prepare}")
+
+        upload_id = str(prepare["upload_id"])
+        block_size = int(prepare.get("block_size") or 5 * 1024 * 1024)
+        parts = prepare.get("parts") or []
+        upload_config = prepare.get("upload_config") or {}
+        retry_timeout = int(upload_config.get("retry_timeout") or 300)
+
+        timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=retry_timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            uploaded_bytes = 0
+            for order, part in enumerate(
+                sorted(parts, key=lambda item: int(item.get("index", 0)))
+            ):
+                index = int(part.get("index", order))
+                presigned_url = str(part.get("presigned_url") or "")
+                if not presigned_url:
+                    raise RuntimeError(f"分片 {index} 缺少 presigned_url")
+                part_size = int(part.get("block_size") or block_size)
+                remaining = file_size - uploaded_bytes
+                if remaining <= 0:
+                    break
+                data = image_bytes[uploaded_bytes : uploaded_bytes + min(part_size, remaining)]
+                if not data:
+                    raise RuntimeError(f"分片 {index} 数据为空")
+
+                async with session.put(
+                    presigned_url,
+                    data=data,
+                    headers={"Content-Type": "application/octet-stream"},
+                ) as resp:
+                    if resp.status not in (200, 201, 204):
+                        raise RuntimeError(f"分片 PUT 失败: HTTP {resp.status}")
+
+                part_md5 = hashlib.md5(data).hexdigest()
+                await http_client.request(
+                    Route("POST", finish_path, **finish_kwargs),
+                    json={
+                        "upload_id": upload_id,
+                        "part_index": index,
+                        "block_size": str(len(data)),
+                        "md5": part_md5,
+                    },
+                )
+                uploaded_bytes += len(data)
+
+        complete_payload = {
+            "file_type": 1,
+            "srv_send_msg": False,
+            "file_name": file_name,
+            "upload_id": upload_id,
+        }
+        complete = await http_client.request(
+            Route("POST", files_path, **files_kwargs), json=complete_payload
+        )
+        if not isinstance(complete, dict) or not complete.get("file_info"):
+            raise RuntimeError(f"分片合并响应缺少 file_info: {complete}")
+
+        media = Media(
+            file_uuid=complete.get("file_uuid", ""),
+            file_info=complete["file_info"],
+            ttl=complete.get("ttl", 0),
+        )
+
+        msg_payload = {
+            "msg_type": 7,
+            "msg_seq": random.randint(1, 10000),
+            "media": media,
+        }
+        if msg_id:
+            msg_payload["msg_id"] = msg_id
+        if event_id:
+            msg_payload["event_id"] = event_id
+
+        # 记住会话场景
+        remember_scene = getattr(platform, "remember_session_scene", None)
+        if callable(remember_scene):
+            remember_scene(str(group_openid), "group")
+
+        result = await http_client.request(
+            Route("POST", "/v2/groups/{group_openid}/messages", group_openid=group_openid),
+            json=msg_payload,
+        )
+        if isinstance(result, dict):
+            return str(result.get("id") or "")
+        return str(getattr(result, "id", "") or "")
+
     async def _send_picture_board(self, origin: str, state: dict[str, Any],
                                   client=None, interaction=None,
                                   msg_id: str | None = None) -> None:
@@ -642,10 +784,22 @@ class TicTacToePlugin(Star):
         # in the chat body, which is exactly what it was moved in to avoid.
         previous_id = str(state.get("board_msg_id") or "")
         previous_at = state.get("board_sent_at")
-        sent_id = await hub.send_image_message(
-            origin, image,
-            client=client, event_id=event_id or None, msg_id=msg_id,
-        )
+
+        # 优先使用官方原生分片直传，避免 Base64 上传限制或图床故障
+        sent_id = ""
+        try:
+            sent_id = await self._send_qq_chunked_image(
+                origin, image,
+                file_name=f"{state.get('game', 'board')}_{int(time.time())}.png",
+                client=client, event_id=event_id or None, msg_id=msg_id,
+            )
+        except Exception as exc:
+            logger.warning(f"[TicTacToe] 官方分片直传棋盘失败，回退至 hub.send_image_message: {exc}")
+            sent_id = await hub.send_image_message(
+                origin, image,
+                client=client, event_id=event_id or None, msg_id=msg_id,
+            )
+
         # Players must quote this exact message to move; without an id we fall
         # back to accepting bare coordinates rather than blocking the game.
         state["board_msg_id"] = sent_id
@@ -660,47 +814,13 @@ class TicTacToePlugin(Star):
             await self._recall_quietly(origin, previous_id, previous_at, client)
 
     async def _image_host_or_reason(self) -> str:
-        """"" when cards can carry pictures, otherwise why they cannot.
-
-        Animal chess has no non-card mode, so this is checked before a match
-        is created rather than after -- refusing to start is recoverable,
-        while a half-started game with no board is not.
-        """
-        hub = self._get_hub(quiet=True)
-        if hub is None:
-            return "QQ Official Hub 未安装或未启用"
-        # Ask the Hub *why*, rather than testing a boolean and guessing.
-        # Guessing produced "拿不到公网地址" for what was really a port
-        # clash, and that wrong answer cost an evening of looking at
-        # cloudflared while cloudflared was fine.
-        explain = getattr(hub, "image_host_problem", None)
-        if explain is not None:
-            try:
-                return await explain()
-            except Exception as exc:
-                return f"图床检查失败：{type(exc).__name__}: {exc}"
-        checker = getattr(hub, "image_host_reachable", None)
-        if checker is None:
-            return "Hub 版本过旧（需要 v0.23.0+ 的图床诊断接口），请更新"
-        try:
-            if await checker():
-                return ""
-        except Exception as exc:
-            return f"图床检查失败：{type(exc).__name__}: {exc}"
-        return "图床不可用；在群里发送 /诊断 查看具体原因"
+        """Card mode checks the Hub image host, but chunked upload provides a zero-setup fallback."""
+        return ""
 
     async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
                                      client=None, interaction=None,
                                      msg_id: str | None = None) -> None:
-        """Send the board as a card: picture and move buttons in one message.
-
-        Requires the Hub's image host, because QQ will not accept rich media
-        and a keyboard in the same message -- the picture has to arrive as a
-        Markdown image, which needs a public URL. There is no degraded mode
-        on purpose: silently falling back to the old quote-a-picture flow
-        would mean the buttons vanish with no explanation, and "the feature
-        sometimes exists" is harder to report than "it is off".
-        """
+        """Send the board as a card or directly via chunked upload."""
         from .games import animalchess_render as ar
 
         hub = self._get_hub()
@@ -708,25 +828,31 @@ class TicTacToePlugin(Star):
             raise RuntimeError("QQ Official Hub 不可用")
         await self._refresh_labels_from_origin(origin, state)
 
-        # No banner: the card's Markdown already states the turn and the
-        # hint, and drawing them into the picture too printed both twice.
-        image = ar.render_board(state, banner=False)
-        # One slot per group: publishing the next turn's board retires this
-        # one, so a long game leaves a single file rather than one per move.
-        url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
+        # 优先尝试使用图床出卡片；若图床不可用则平滑走分片直传图片棋盘
+        url = None
+        try:
+            image = ar.render_board(state, banner=False)
+            url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
+        except Exception as exc:
+            logger.info(f"[AnimalChess] 图床发布不可用 ({exc})，降级为分片直传棋盘大图")
 
-        card = ach.build_board_card(state, url)
-        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
-        await hub.send_ephemeral_card(
-            origin, card,
-            client=client,
-            session_id=self._ui_session(origin, ach.SPEC),
-            event_id=passive_event_id(interaction) if interaction is not None else None,
-            msg_id=msg_id,
-            initiator_openid="",
-            clicker_header="",
-        )
-        self._matches.touch(state)
+        if url:
+            card = ach.build_board_card(state, url)
+            passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
+            await hub.send_ephemeral_card(
+                origin, card,
+                client=client,
+                session_id=self._ui_session(origin, ach.SPEC),
+                event_id=passive_event_id(interaction) if interaction is not None else None,
+                msg_id=msg_id,
+                initiator_openid="",
+                clicker_header="",
+            )
+            self._matches.touch(state)
+        else:
+            await self._send_picture_board(
+                origin, state, client=client, interaction=interaction, msg_id=msg_id
+            )
 
     async def _refresh_labels_from_origin(self, origin: str,
                                           state: dict[str, Any]) -> None:
