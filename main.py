@@ -820,24 +820,20 @@ class TicTacToePlugin(Star):
     async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
                                      client=None, interaction=None,
                                      msg_id: str | None = None) -> None:
-        """Send the board as a card or directly via chunked upload."""
-        from .games import animalchess_render as ar
-
+        """Send the board via native chunked upload, accompanied by interactive action card."""
         hub = self._get_hub()
         if hub is None:
             raise RuntimeError("QQ Official Hub 不可用")
         await self._refresh_labels_from_origin(origin, state)
 
-        # 优先尝试使用图床出卡片；若图床不可用则平滑走分片直传图片棋盘
-        url = None
-        try:
-            image = ar.render_board(state, banner=False)
-            url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
-        except Exception as exc:
-            logger.info(f"[AnimalChess] 图床发布不可用 ({exc})，降级为分片直传棋盘大图")
+        # 1. 棋盘大图：100% 官方原生分片直传（彻底脱离公网图床依赖，绝不加载失败）
+        await self._send_picture_board(
+            origin, state, client=client, interaction=interaction, msg_id=msg_id
+        )
 
-        if url:
-            card = ach.build_board_card(state, url)
+        # 2. 交互操作面板：下发带动物与方向按钮的操作卡片
+        try:
+            card = ach.build_board_card(state, image_url="")
             passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
             await hub.send_ephemeral_card(
                 origin, card,
@@ -848,11 +844,9 @@ class TicTacToePlugin(Star):
                 initiator_openid="",
                 clicker_header="",
             )
-            self._matches.touch(state)
-        else:
-            await self._send_picture_board(
-                origin, state, client=client, interaction=interaction, msg_id=msg_id
-            )
+        except Exception as exc:
+            logger.warning(f"[AnimalChess] 发送操作按钮卡片失败 (玩家仍可直接回复走棋): {exc}")
+        self._matches.touch(state)
 
     async def _refresh_labels_from_origin(self, origin: str,
                                           state: dict[str, Any]) -> None:

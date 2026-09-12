@@ -671,8 +671,8 @@ def movable_animals(state: dict[str, Any], side: str = "") -> list[str]:
     return [animal for animal in ANIMALS if animal in alive]
 
 
-def build_board_card(state: dict[str, Any], image_url: str) -> dict[str, Any]:
-    """The board as one card: picture, animals, directions.
+def build_board_card(state: dict[str, Any], image_url: str = "") -> dict[str, Any]:
+    """The board as one card: picture (if image_url provided), animals, directions.
 
     Buttons are **type=2**: tapping appends text to the input box without
     sending, so a move is composed as 「鼠」+「下」and sent deliberately.
@@ -719,8 +719,9 @@ def build_board_card(state: dict[str, Any], image_url: str) -> dict[str, Any]:
 
     lines = [
         f"**{status_text(state)}**",
-        f"![棋盘 #{CARD_IMAGE_WIDTH}px #{CARD_IMAGE_HEIGHT}px]({image_url})",
     ]
+    if image_url:
+        lines.append(f"![棋盘 #{CARD_IMAGE_WIDTH}px #{CARD_IMAGE_HEIGHT}px]({image_url})")
     last = state.get("last_move")
     if last:
         eaten = f" 吃{NAMES[last['captured']]}" if last.get("captured") else ""
