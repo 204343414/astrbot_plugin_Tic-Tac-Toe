@@ -250,12 +250,18 @@ def render_board(state: dict[str, Any], banner: bool = True) -> bytes:
 
     if banner:
         _draw_banner(image, draw, state)
+        if SCALE != 1.0:
+            image = image.resize(
+                (round(BOARD_WIDTH * SCALE), round(BOARD_HEIGHT * SCALE)),
+                Image.LANCZOS,
+            )
+    else:
+        # Card mode: match the card's declared 720px width exactly.
+        # Produces a ~60KB ultra-fast image that Tencent's CDN downloads instantaneously.
+        target_w = 720
+        target_h = round(target_w * BOARD_HEIGHT / BOARD_WIDTH)
+        image = image.resize((target_w, target_h), Image.LANCZOS)
 
-    if SCALE != 1.0:
-        image = image.resize(
-            (round(BOARD_WIDTH * SCALE), round(BOARD_HEIGHT * SCALE)),
-            Image.LANCZOS,
-        )
     buffer = io.BytesIO()
     # JPEG has no alpha channel; the board is fully opaque anyway.
     image.convert("RGB").save(

@@ -814,38 +814,44 @@ class TicTacToePlugin(Star):
             await self._recall_quietly(origin, previous_id, previous_at, client)
 
     async def _image_host_or_reason(self) -> str:
-        """Card mode checks the Hub image host, but chunked upload provides a zero-setup fallback."""
+        hub = self._get_hub(quiet=True)
+        if hub is None:
+            return "QQ Official Hub 未安装或未启用"
+        checker = getattr(hub, "image_host_reachable", None)
+        if checker is not None:
+            try:
+                if not await checker():
+                    return "图床未就绪；请确认 Hub 图床及公网隧道正常"
+            except Exception as exc:
+                return f"图床检查失败：{exc}"
         return ""
 
     async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
                                      client=None, interaction=None,
                                      msg_id: str | None = None) -> None:
-        """Send the board via native chunked upload, accompanied by interactive action card."""
+        """Send the board as a single card embedding the board image and interactive buttons."""
+        from .games import animalchess_render as ar
+
         hub = self._get_hub()
         if hub is None:
             raise RuntimeError("QQ Official Hub 不可用")
         await self._refresh_labels_from_origin(origin, state)
 
-        # 1. 棋盘大图：100% 官方原生分片直传（彻底脱离公网图床依赖，绝不加载失败）
-        await self._send_picture_board(
-            origin, state, client=client, interaction=interaction, msg_id=msg_id
-        )
+        # 渲染卡片专用轻量棋盘图并发布至图床
+        image = ar.render_board(state, banner=False)
+        url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
 
-        # 2. 交互操作面板：下发带动物与方向按钮的操作卡片
-        try:
-            card = ach.build_board_card(state, image_url="")
-            passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
-            await hub.send_ephemeral_card(
-                origin, card,
-                client=client,
-                session_id=self._ui_session(origin, ach.SPEC),
-                event_id=passive_event_id(interaction) if interaction is not None else None,
-                msg_id=msg_id,
-                initiator_openid="",
-                clicker_header="",
-            )
-        except Exception as exc:
-            logger.warning(f"[AnimalChess] 发送操作按钮卡片失败 (玩家仍可直接回复走棋): {exc}")
+        card = ach.build_board_card(state, url)
+        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
+        await hub.send_ephemeral_card(
+            origin, card,
+            client=client,
+            session_id=self._ui_session(origin, ach.SPEC),
+            event_id=passive_event_id(interaction) if interaction is not None else None,
+            msg_id=msg_id,
+            initiator_openid="",
+            clicker_header="",
+        )
         self._matches.touch(state)
 
     async def _refresh_labels_from_origin(self, origin: str,
