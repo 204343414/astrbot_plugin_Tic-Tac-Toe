@@ -474,6 +474,11 @@ class TicTacToePlugin(Star):
         if state is None or state.get("game") != "gomoku":
             return 3
         if state.get("phase") != gk.PHASE_WAITING:
+            # QQ may retry a callback after the first request already started
+            # the match. Treat the same guest's retry as idempotent instead of
+            # showing the misleading “请勿重复操作” toast.
+            if context.member_openid == state["players"].get(gk.WHITE, ""):
+                return 0
             return 3  # already started; the ⚪ seat is taken
         if context.member_openid == state["players"].get(gk.BLACK, ""):
             return 4  # toast only; the card stays usable for a real opponent
