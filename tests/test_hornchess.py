@@ -241,9 +241,10 @@ def test_on_the_eleven_point_board_the_bull_wins_perfect_play():
         assert hc.solve_state(probe) == hc.BULL
 
 
-def test_the_hard_ai_still_leaves_the_human_a_chance():
-    """困难档不能是"永不失手"，否则 11 点盘上玩家一盘也赢不了。"""
-    assert 0 < hc.LEVEL_BLUNDER["hard"] < hc.LEVEL_BLUNDER["normal"]
+def test_hard_is_flawless_and_the_weaker_levels_are_not():
+    """困难档一步都不让；轻松／普通才是留给玩家赢的口子。"""
+    assert hc.LEVEL_BLUNDER["hard"] == 0.0
+    assert hc.LEVEL_BLUNDER["easy"] > hc.LEVEL_BLUNDER["normal"] > 0
 
 
 def test_the_eleven_point_board_is_the_one_from_the_photo_even_if_it_favours_the_bull():
@@ -298,23 +299,59 @@ def test_the_hard_ai_never_loses_the_bull_when_it_can_avoid_it():
     verdicts = {hc.name_of(m[2]): hc._solve()[(m[2], tuple(sorted(state["humans"])), hc.HUMANS)][0]
                 for m in hc.legal_moves(state)}
     assert hc.HUMANS in verdicts.values() and hc.BULL in verdicts.values()
-    safe = [name for name, verdict in verdicts.items() if verdict == hc.BULL]
+    safe = {name for name, verdict in verdicts.items() if verdict == hc.BULL}
 
-    # 困难档：绝大多数时候走"活路"，但留一点犯错空间（否则人永远赢不了）。
+    # 困难档：300 次全都走活路，一次都不许错。
     rng = random.Random(7)
     picks = [hc.name_of(hc.ai_move(setup("C1", ("B2", "C2"), hc.BULL,
                                         level="hard"), rng)[1])
              for _ in range(300)]
-    hit = sum(1 for name in picks if name in safe) / len(picks)
-    assert 0.8 <= hit < 1.0, hit
+    assert set(picks) <= safe
 
-    # 简单档：明显更常犯错。
+    # 简单档：明显会走错。
     rng = random.Random(7)
     easy = [hc.name_of(hc.ai_move(setup("C1", ("B2", "C2"), hc.BULL,
                                        level="easy"), rng)[1])
             for _ in range(300)]
-    easy_hit = sum(1 for name in easy if name in safe) / len(easy)
-    assert easy_hit < hit
+    assert any(name not in safe for name in easy)
+
+
+def test_hard_never_turns_a_result_around_on_any_position():
+    """全表扫一遍：困难档在 990 个局面里一步都不能把胜负走反。
+
+    这是"AI 到底是不是最优解"最硬的证据——不是抽样，是把每一个局面都走一遍。
+    """
+    rng = random.Random(11)
+    flipped = []
+    for (bull, humans, turn), (winner, _) in hc._solve().items():
+        state = hc.new_state(hc.MODE_AI, "U1", "hard")
+        state["bull"], state["humans"], state["turn"] = bull, list(humans), turn
+        if hc.result(state):
+            continue
+        hc.ai_move(state, rng)
+        # 走完轮到对手，所以"对手的结论"应该还是原来那个赢家
+        if hc.solve_state(state) != winner:
+            flipped.append((bull, humans, turn))
+    assert flipped == []
+
+
+def test_hard_takes_the_fastest_win_instead_of_dawdling():
+    """必胜的时候要挑最短的那步——之前一律挑步数最大的，看着像在磨洋工。
+
+    这个局面（牛在 C1，人在 A1／B2）牛有三条赢法：马上赢、2 步后赢、4 步后赢。
+    """
+    state = setup("C1", ("A1", "B2"), hc.BULL, level="hard")
+    options = []
+    for _, frm, to in hc.legal_moves(state):
+        winner, depth = hc._solve()[(to, tuple(sorted(state["humans"])), hc.HUMANS)]
+        options.append((hc.name_of(to), winner, depth))
+    winning = [(name, depth) for name, winner, depth in options if winner == hc.BULL]
+    assert len(winning) >= 2 and len({depth for _, depth in winning}) >= 2, options
+
+    _, chosen = hc.ai_move(state, random.Random(3))
+    assert hc.solve_state(state) == hc.BULL
+    assert hc.solve_depth(state) == min(depth for _, depth in winning)
+    assert hc.name_of(chosen) == min(winning, key=lambda pair: pair[1])[0]
 
 
 def test_the_easy_ai_sometimes_blunders():

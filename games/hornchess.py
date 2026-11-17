@@ -407,16 +407,26 @@ def solve_depth(state: dict[str, Any]) -> int:
 
 # --- AI ---------------------------------------------------------------------
 
-#: 难度 → 牛的犯错概率。11 点盘上"完美走"的牛不可战胜（穷举见模块开头），
-#: 所以困难档也得留一点犯错空间，否则玩家永远赢不了——那不是难度。
-LEVEL_BLUNDER = {"easy": 0.45, "normal": 0.22, "hard": 0.08}
+#: 难度 → 犯错概率。**困难档是 0：老老实实走穷举表里的最优解**，一步都不让。
+#:
+#: 之前这里给困难档留了 8%，本意是"别让玩家永远赢不了"，结果体验很糟：一局要走
+#: 十几步，8% 累计下来至少送一次的概率超过 80%，玩家看到的就是"这 AI 好笨"。
+#: 真正让玩家赢不了的从来不是"AI 不失误"，而是这块盘本身偏牛（穷举见模块开头），
+#: 所以困难档就应该是不可战胜的——想赢就降难度，或者把 FARMERS_MAY_RETREAT 打开
+#: 让人也能后退（那样人是必胜方，牛这边才需要"聪明"）。
+LEVEL_BLUNDER = {"easy": 0.45, "normal": 0.22, "hard": 0.0}
 
 
 def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, int]:
-    """走完这步之后，从**走这步的那一方**看有多好。
+    """走完这步之后，从**走这步的那一方**看有多好：``(胜负, 方向已经摆正的步数)``。
 
-    先比胜负（2 赢 / 1 和 / 0 输），再比"几步见分晓"：能赢就往快里走（步数小
-    优先），要输就往慢里拖（步数大优先）——牛靠拖延也能赢，人也一样想快点了结。
+    胜负 2 赢 / 0 输。第二项就是穷举表里那个"几步见分晓"，但**方向要按胜负调**：
+
+    * 能赢 → 越早赢越好（步数小），所以取负号；
+    * 会输 → 越晚输越好（步数大），所以保留原值。
+
+    这两条合起来才是"最优"——之前不分方向、一律挑步数最大的，结果必胜的时候
+    AI 会挑最慢的赢法，看着像在磨洋工。
     """
     side, frm, to = move
     if side == BULL:
@@ -426,8 +436,9 @@ def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, 
         humans[humans.index(frm)] = to
         key = (state["bull"], tuple(sorted(humans)), BULL)
     winner, depth = _solve().get(key, (BULL, PLY_LIMIT))
-    rank = 2 if winner == side else 0
-    return rank, depth
+    if winner == side:
+        return 2, -depth          # 赢：越快越好
+    return 0, depth               # 输：越慢越好（拖到步数用完也是牛赢）
 
 
 def ai_move(state: dict[str, Any], rng: random.Random | None = None) -> tuple[int, int] | None:
