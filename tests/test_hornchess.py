@@ -1,11 +1,12 @@
 """牛角棋：棋盘、规则、穷举求解、AI、按钮。
 
-这棋规则只有三条，但**每一条错一点都会把平衡彻底翻转**（人必胜／牛必胜／无限
-横走）。所以除了常规断言，这里还把穷举结论钉住：
+棋盘照用户实拍的民间真盘画：6 行 11 点、19 条线，连线规律是"每点只连编号
+±1／±2"。规则只有三条，但**每一条错一点都会把平衡彻底翻转**（人必胜／牛必胜／
+无限横走），所以除了常规断言，这里还把穷举结论钉住：
 
-* 用民间真盘（11 点 6 行）在"只能前进"的旧规则下，牛必胜；
-* 加上"同一横杆可左右挪"，11 点盘仍然是牛必胜（穷举验证）；
-* **4 行 7 点** 恰好是人真能困死牛、牛也真能跑的那一档 → 所以用 7 点盘。
+* 11 点盘、人只能前进（可同杆横走）、牛前后左右自由 → **牛只要不失误就赢**
+  （990 个局面里牛胜 954、人胜 36）。所以"人能赢"必须靠牛犯错，AI 的困难档
+  也得留一点犯错空间，否则玩家永远赢不了。
 
 另外独立实现了一套纯暴力解（``brute_force``）跟生产代码的逆向分析对拍，防止
 表算错却自圆其说。
@@ -41,16 +42,28 @@ def setup(bull, humans, turn, level="normal"):
 
 # --- 棋盘形状 ---------------------------------------------------------------
 
-def test_the_board_is_a_four_row_horn():
-    assert hc.ROWS == (1, 2, 2, 2)
-    assert len(hc.NAMES) == 7
-    assert hc.NAMES[0] == "A1" and hc.NAMES[-1] == "D2"
+def test_the_board_is_the_six_row_horn_from_the_photo():
+    """用户实拍的盘：高瘦牛角，6 行 11 个点。"""
+    assert hc.ROWS == (1, 2, 2, 2, 2, 2)
+    assert len(hc.NAMES) == 11
+    assert hc.NAMES[0] == "A1" and hc.NAMES[-1] == "F2"
 
 
 def test_rows_from_tip_to_base():
-    assert hc.DEPTH == (0, 1, 1, 2, 2, 3, 3)
+    assert hc.DEPTH == (0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5)
     assert [name for name, d in zip(hc.NAMES, hc.DEPTH) if d == 0] == ["A1"]
-    assert [name for name, d in zip(hc.NAMES, hc.DEPTH) if d == 3] == ["D1", "D2"]
+    assert [name for name, d in zip(hc.NAMES, hc.DEPTH) if d == 5] == ["F1", "F2"]
+
+
+def test_the_board_has_the_nineteen_lines_the_real_board_has():
+    """左列 5 条 + 右列 5 条 + 5 道横杆 + 4 条平行长斜线 = 19。"""
+    edges = {(min(a, b), max(a, b))
+             for a in range(len(hc.NAMES)) for b in hc.neighbors(a)}
+    assert len(edges) == 19
+    # 每一行的两个点之间必须是横杆（同杆可横走的规则靠它）
+    for depth in range(1, len(hc.ROWS)):
+        row = [i for i, d in enumerate(hc.DEPTH) if d == depth]
+        assert tuple(row) in edges
 
 
 def test_neighbours_are_exactly_plus_or_minus_one_and_two():
@@ -73,21 +86,23 @@ def test_the_tip_touches_exactly_the_two_points_below_it():
 
 
 def test_the_base_corners_are_the_escape_points():
-    assert hc.ESCAPE_POINTS == (hc.INDEX["D1"], hc.INDEX["D2"])
+    assert hc.ESCAPE_POINTS == (hc.INDEX["F1"], hc.INDEX["F2"])
+    assert sorted(hc.new_state(hc.MODE_AI, "U1")["humans"]) == list(hc.ESCAPE_POINTS)
 
 
 # --- 规则 -------------------------------------------------------------------
 
 def test_the_bull_may_go_backwards_but_the_farmers_may_not():
     """牛可进可退，人只能往尖上赶——这是这棋的核心不对称。"""
-    bull_targets = set(hc.neighbors(hc.INDEX["C1"]))
-    assert hc.INDEX["B1"] in bull_targets       # 往上（往尖，进）
-    assert hc.INDEX["D1"] in bull_targets       # 往下（往底角，退），牛可以
+    bull_targets = set(hc.neighbors(hc.INDEX["D1"]))
+    assert hc.INDEX["C1"] in bull_targets       # 往上（往尖，进）
+    assert hc.INDEX["E1"] in bull_targets       # 往下（往底角，退），牛可以
 
-    human_targets = set(hc.forward_targets(hc.INDEX["C1"]))
-    assert hc.INDEX["B1"] in human_targets      # 人可以前进
-    assert hc.INDEX["C2"] in human_targets      # 同一条横杆可以左右挪
-    assert hc.INDEX["D1"] not in human_targets  # 人不能后退
+    human_targets = set(hc.forward_targets(hc.INDEX["D1"]))
+    assert hc.INDEX["C1"] in human_targets      # 人可以前进
+    assert hc.INDEX["D2"] in human_targets      # 同一条横杆可以左右挪
+    assert hc.INDEX["E1"] not in human_targets  # 人不能后退
+    assert hc.FARMERS_MAY_RETREAT is False
 
 
 def test_farmers_may_shift_sideways_along_a_crossbar():
@@ -114,16 +129,16 @@ def test_lateral_shuttling_is_allowed_by_the_rules():
 
 
 def test_farmers_may_not_move_down():
-    state = setup("A1", ("C1", "C2"), hc.HUMANS)
-    refusal = hc.apply_move(state, hc.INDEX["C1"], hc.INDEX["D1"])
+    state = setup("A1", ("D1", "D2"), hc.HUMANS)
+    refusal = hc.apply_move(state, hc.INDEX["D1"], hc.INDEX["E1"])
     assert refusal and "不能后退" in refusal
 
 
 # --- 胜负 -------------------------------------------------------------------
 
 def test_bull_wins_by_reaching_a_base_corner():
-    state = setup("C1", ("B1", "B2"), hc.BULL)
-    assert hc.apply_move(state, hc.INDEX["C1"], hc.INDEX["D1"]) == ""
+    state = setup("E1", ("B1", "B2"), hc.BULL)
+    assert hc.apply_move(state, hc.INDEX["E1"], hc.INDEX["F1"]) == ""
     assert hc.result(state) == hc.BULL
     assert "冲出牛角" in hc.status_text(state)
 
@@ -136,7 +151,7 @@ def test_farmers_win_by_trapping_the_bull_on_the_tip():
 
 def test_the_bull_wins_when_the_ply_limit_runs_out():
     """这条是"不许在横杆上无限横走"的闸门，缺了它人可以直接躺赢。"""
-    state = setup("C1", ("B1", "C1"), hc.HUMANS)
+    state = setup("D1", ("B1", "C1"), hc.HUMANS)
     state["plies"] = hc.PLY_LIMIT
     assert hc.result(state) == hc.BULL
     assert "步数用完" in hc.status_text(state)
@@ -151,8 +166,8 @@ def test_status_text_counts_the_remaining_plies():
 
 def test_the_solver_covers_every_position():
     table = hc._solve()
-    expected = 7 * 15 * 2          # 7 个牛位置 × C(6,2) 个人位置 × 2 个走子方
-    assert len(table) == expected == 210
+    expected = 11 * 45 * 2         # 11 个牛位置 × C(10,2) 个人位置 × 2 个走子方
+    assert len(table) == expected == 990
     assert {winner for winner, _ in table.values()} <= {hc.HUMANS, hc.BULL}
 
 
@@ -192,36 +207,47 @@ def brute_force(bull, humans, turn, limit=hc.PLY_LIMIT):
 
 
 @pytest.mark.parametrize("bull,humans,turn", [
+    (0, (9, 10), hc.HUMANS),
+    (0, (9, 10), hc.BULL),
     (0, (5, 6), hc.HUMANS),
-    (0, (5, 6), hc.BULL),
-    (0, (3, 4), hc.HUMANS),
-    (2, (0, 5), hc.HUMANS),
-    (6, (1, 3), hc.BULL),
-    (4, (0, 1), hc.HUMANS),
+    (3, (0, 8), hc.HUMANS),
+    (9, (1, 3), hc.BULL),
+    (6, (0, 1), hc.HUMANS),
 ])
 def test_the_table_agrees_with_a_dumb_brute_force(bull, humans, turn):
     table = hc._solve()[(bull, humans, turn)][0]
     assert table == brute_force(bull, humans, turn)
 
 
-def test_the_opening_is_a_win_for_the_farmers_but_they_must_play_it_right():
-    """开局人必胜——但三手里只有两手是对的，走错就轮到牛赢。"""
-    state = fresh()
-    assert hc.solve_state(state) == hc.HUMANS
-    assert hc.solve_depth(state) == 11          # 最快 11 手困死
+def test_on_the_eleven_point_board_the_bull_wins_perfect_play():
+    """把"这棋到底平衡吗"钉死：完美对弈是牛胜，人赢只能靠牛犯错。
 
-    assert len(hc.legal_moves(state)) == 3
-    verdicts = []
+    这条看起来像在给"人赢不了"背书，其实是**产品决策的依据**：既然 11 点盘上
+    牛不失误就赢，AI 的困难档就必须留一点犯错空间（见 LEVEL_BLUNDER），
+    否则玩家永远赢不了——那不是难度是堵墙。
+    """
+    from collections import Counter
+
+    table = hc._solve()
+    tally = Counter(winner for winner, _ in table.values())
+    assert tally[hc.BULL] == 954 and tally[hc.HUMANS] == 36
+
+    state = fresh()
+    assert hc.solve_state(state) == hc.BULL
+    assert len(hc.legal_moves(state)) == 3      # 开局人只有三步可走
     for _, frm, to in hc.legal_moves(state):
         probe = fresh()
         assert hc.apply_move(probe, frm, to) == ""
-        verdicts.append(hc.solve_state(probe))
-    assert verdicts.count(hc.HUMANS) == 2
-    assert verdicts.count(hc.BULL) == 1
+        assert hc.solve_state(probe) == hc.BULL
 
 
-def test_the_four_row_board_is_the_only_size_a_normal_human_can_win_on():
-    """把"为什么是 7 点"钉住：加上横走以后，9／11 点盘照样是牛必胜。"""
+def test_the_hard_ai_still_leaves_the_human_a_chance():
+    """困难档不能是"永不失手"，否则 11 点盘上玩家一盘也赢不了。"""
+    assert 0 < hc.LEVEL_BLUNDER["hard"] < hc.LEVEL_BLUNDER["normal"]
+
+
+def test_the_eleven_point_board_is_the_one_from_the_photo_even_if_it_favours_the_bull():
+    """民间三种常见尺寸全跑一遍，把"11 点盘是牛优"记在测试里，别哪天改规则改出幻觉。"""
     def build(count):
         depth = [0] + [1 + (i - 1) // 2 for i in range(1, count)]
         neighbours = {i: tuple(j for j in (i - 2, i - 1, i + 1, i + 2)
@@ -258,25 +284,37 @@ def test_the_four_row_board_is_the_only_size_a_normal_human_can_win_on():
 
         return walk(0, base, hc.HUMANS, limit)
 
-    assert farmers_win(7) is True       # 本项目用的 4 行盘
+    assert farmers_win(5) is True        # 3 行：太短，人随便就围住
+    assert farmers_win(7) is True        # 4 行：人真能围住
     assert farmers_win(9) is False       # 5 行
-    assert farmers_win(11) is False      # 6 行（民间标准盘）
+    assert farmers_win(11) is False      # 6 行——就是用户实拍这块盘
 
 
 # --- AI ---------------------------------------------------------------------
 
 def test_the_hard_ai_never_loses_the_bull_when_it_can_avoid_it():
     """困难档不许犯傻：只要存在"不输"的一步，走一千次都要选它。"""
-    rng = random.Random(7)
-    # 这个局面牛有两步：B1 会送死，D1 才活（穷举表里查得到）。
-    state = setup("C1", ("B2", "C2"), hc.BULL, level="hard")
+    state = setup("C1", ("B2", "C2"), hc.BULL)
     verdicts = {hc.name_of(m[2]): hc._solve()[(m[2], tuple(sorted(state["humans"])), hc.HUMANS)][0]
                 for m in hc.legal_moves(state)}
-    assert verdicts == {"B1": hc.HUMANS, "D1": hc.BULL}
-    for _ in range(200):
-        probe = setup("C1", ("B2", "C2"), hc.BULL, level="hard")
-        frm, to = hc.ai_move(probe, rng)
-        assert hc.name_of(to) == "D1"
+    assert hc.HUMANS in verdicts.values() and hc.BULL in verdicts.values()
+    safe = [name for name, verdict in verdicts.items() if verdict == hc.BULL]
+
+    # 困难档：绝大多数时候走"活路"，但留一点犯错空间（否则人永远赢不了）。
+    rng = random.Random(7)
+    picks = [hc.name_of(hc.ai_move(setup("C1", ("B2", "C2"), hc.BULL,
+                                        level="hard"), rng)[1])
+             for _ in range(300)]
+    hit = sum(1 for name in picks if name in safe) / len(picks)
+    assert 0.8 <= hit < 1.0, hit
+
+    # 简单档：明显更常犯错。
+    rng = random.Random(7)
+    easy = [hc.name_of(hc.ai_move(setup("C1", ("B2", "C2"), hc.BULL,
+                                       level="easy"), rng)[1])
+            for _ in range(300)]
+    easy_hit = sum(1 for name in easy if name in safe) / len(easy)
+    assert easy_hit < hit
 
 
 def test_the_easy_ai_sometimes_blunders():
@@ -289,7 +327,7 @@ def test_the_easy_ai_sometimes_blunders():
 
 
 def test_ai_move_changes_the_state_and_hands_the_turn_back():
-    state = setup("A1", ("D1", "D2"), hc.BULL)
+    state = setup("A1", ("F1", "F2"), hc.BULL)
     frm, to = hc.ai_move(state, random.Random(1))
     assert state["bull"] == to and frm == hc.INDEX["A1"]
     assert state["turn"] == hc.HUMANS
@@ -315,7 +353,8 @@ def test_farmer_buttons_cover_every_legal_move_once():
 
 def test_buttons_never_exceed_five_per_row():
     """QQ 键盘一行最多 5 个按钮。"""
-    for bull, humans in itertools.product(range(7), itertools.combinations(range(7), 2)):
+    for bull, humans in itertools.product(range(len(hc.NAMES)),
+                                          itertools.combinations(range(len(hc.NAMES)), 2)):
         if bull in humans:
             continue
         state = setup(hc.name_of(bull), tuple(hc.name_of(h) for h in humans), hc.HUMANS)

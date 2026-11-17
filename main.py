@@ -615,8 +615,8 @@ class TicTacToePlugin(Star):
     async def _act_hornchess_move(self, context, params) -> int:
         """棋盘按钮：一次点击就是一步棋。
 
-        这是牛角棋值得单独做一个的原因——7 个点、每方最多 4 种走法，
-        全部塞进键盘绰绰有余。斗兽棋要点两次，国际象棋只能打字，这里
+        这是牛角棋值得单独做一个的原因——11 个点、每方最多 4 种走法，
+        全部塞进键盘绰绰有余（一行最多 5 个按钮）。斗兽棋要点两次，国际象棋只能打字，这里
         点一下就完事。
         """
         state = self._matches.get(context.origin)
