@@ -159,3 +159,12 @@ CHESS = GameSpec(
     host_mark="⚪",
     guest_mark="⚫",
 )
+
+HORNCHESS = GameSpec(
+    key="hornchess",
+    title="牛角棋",
+    how_to=("**点按钮走棋**：牛（🐂）可进可退，赶牛的人（🧑‍🌾）只能往前不能退。"
+            "把牛逼到牛角尖无路可走就赢；牛冲到底线则牛赢。"),
+    host_mark="🧑‍🌾",
+    guest_mark="🐂",
+)

@@ -30,6 +30,7 @@ from astrbot.api.star import Context, Star, register
 
 from .games import animalchess as ach
 from .games import chess as ch
+from .games import hornchess as hn
 from .games import gomoku as gk
 from .games import lobby
 from .games import tictactoe as ttt
@@ -166,6 +167,8 @@ class TicTacToePlugin(Star):
              self._act_lobby_animalchess),
             ("chess.lobby", "♔ 国际象棋", "打开国际象棋卡片：人机 / 群友 / 三档难度。",
              self._act_lobby_chess),
+            ("hornchess.lobby", "🐂 牛角棋", "打开牛角棋卡片：按钮走棋，点一下就是一步。",
+             self._act_lobby_hornchess),
 
             ("tictactoe.start_ai", "井字棋：人机对战", "由井字棋卡片触发。", self._act_start_ai),
             ("tictactoe.start_pvp", "井字棋：群友对战", "由井字棋卡片触发。", self._act_start_pvp),
@@ -203,6 +206,19 @@ class TicTacToePlugin(Star):
             ("chess.join", "国际象棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘。",
              self._act_chess_join),
             ("chess.quit", "国际象棋结束对局", "结束当前群的国际象棋对局。",
+             self._act_quit),
+
+            ("hornchess.start_ai", "牛角棋：人机对战", "由牛角棋卡片触发。",
+             self._act_hornchess_ai),
+            ("hornchess.start_pvp", "牛角棋：群友对战", "由牛角棋卡片触发。",
+             self._act_hornchess_pvp),
+            ("hornchess.set_level", "牛角棋：切换难度", "由牛角棋卡片触发。",
+             self._act_set_level_hornchess),
+            ("hornchess.join", "牛角棋：加入对战", "由等待卡片触发。",
+             self._act_hornchess_join),
+            ("hornchess.move", "牛角棋走棋", "由棋盘按钮触发，请勿手动绑定。",
+             self._act_hornchess_move),
+            ("hornchess.quit", "牛角棋结束对局", "结束当前群的牛角棋对局。",
              self._act_quit),
         ]
         for action_id, title, description, callback in specs:
@@ -297,6 +313,9 @@ class TicTacToePlugin(Star):
     async def _act_lobby_chess(self, context, params) -> int:
         return await self._open_lobby(context, ch.SPEC)
 
+    async def _act_lobby_hornchess(self, context, params) -> int:
+        return await self._open_lobby(context, hn.SPEC)
+
     async def _open_lobby(self, context, spec) -> int:
         """Re-send a game's entry card. Each game owns its own; neither is a
         menu of the other."""
@@ -323,6 +342,9 @@ class TicTacToePlugin(Star):
 
     async def _act_set_level_chess(self, context, params) -> int:
         return await self._set_level(context, ch.SPEC, params)
+
+    async def _act_set_level_hornchess(self, context, params) -> int:
+        return await self._set_level(context, hn.SPEC, params)
 
     async def _set_level(self, context, spec, params) -> int:
         """Difficulty is remembered per group *and per game*:井字棋困难 and
@@ -517,6 +539,132 @@ class TicTacToePlugin(Star):
             logger.exception("[Gomoku] Failed to open board after join")
             return 1
         return 0
+
+    # --- horn chess (picture board, one-tap buttons) ------------------------
+
+    async def _act_hornchess_ai(self, context, params) -> int:
+        return await self._start_hornchess(context, hn.MODE_AI)
+
+    async def _act_hornchess_pvp(self, context, params) -> int:
+        return await self._start_hornchess(context, hn.MODE_PVP)
+
+    async def _start_hornchess(self, context, mode: str) -> int:
+        busy = self._matches.busy_reason(context.origin)
+        if busy:
+            logger.info("[HornChess] %s", busy)
+            return 2
+        reason = await self._image_host_or_reason()
+        if reason:
+            logger.warning("[HornChess] Refusing to start: %s", reason)
+            try:
+                await self._send_card(context, {
+                    "id": "hornchess_unavailable",
+                    "markdown": "\n".join([
+                        "# 牛角棋暂时开不了",
+                        f"**{reason}**",
+                        "",
+                        "棋盘是一张带按钮的卡片，图片要有地方安放才能开局。",
+                    ]),
+                    "rows": [],
+                    "ttl_seconds": 600,
+                }, session_id=self._ui_session(context.origin, hn.SPEC))
+            except Exception:
+                logger.exception("[HornChess] Failed to explain the refusal")
+            return 1
+        state = hn.new_state(mode, context.member_openid,
+                             self._level(context.origin, hn.SPEC))
+        # 严格版（人只能朝尖走）没有做成配置项：这个仓库有一条既有约定——
+        # 配置里只放通用项，不堆各棋种的开关。真要严格版就改
+        # games/hornchess.py 里的 STRICT_FORWARD 常量，一行的事。
+        state["strict"] = hn.STRICT_FORWARD
+        state["display_name"] = hn.SPEC.title
+        self._matches.start(context.origin, state)
+        self._avatars[context.origin] = AvatarCache()
+        try:
+            if mode == hn.MODE_PVP:
+                label = await self._label_of(context, context.member_openid)
+                await self._send_card(
+                    context, hn.build_waiting_card(state, label),
+                    session_id=self._ui_session(context.origin, hn.SPEC),
+                )
+                return 0
+            await self._send_hornchess_card(context.origin, state,
+                                           client=context.client,
+                                           interaction=context.interaction)
+        except Exception:
+            logger.exception("[HornChess] Failed to open board")
+            self._matches.pop(context.origin)
+            return 1
+        return 0
+
+    async def _act_hornchess_join(self, context, params) -> int:
+        state = self._matches.get(context.origin)
+        if state is None or state.get("game") != "hornchess":
+            return 3
+        if state.get("phase") != hn.PHASE_WAITING:
+            return 3
+        if context.member_openid == state["players"].get(hn.HUMANS, ""):
+            return 4
+        state["players"][hn.BULL] = context.member_openid
+        state["phase"] = hn.PHASE_PLAYING
+        try:
+            await self._send_hornchess_card(context.origin, state,
+                                           client=context.client,
+                                           interaction=context.interaction)
+        except Exception:
+            logger.exception("[HornChess] Failed to open board after join")
+            return 1
+        return 0
+
+    async def _act_hornchess_move(self, context, params) -> int:
+        """棋盘按钮：一次点击就是一步棋。
+
+        这是牛角棋值得单独做一个的原因——全部点只有 10 个、每方最多 8 种走法，
+        全部塞进 5×5 的键盘绰绰有余。斗兽棋要点两次，国际象棋只能打字，这里
+        点一下就完事。
+        """
+        state = self._matches.get(context.origin)
+        if state is None or state.get("game") != "hornchess":
+            return 3
+        try:
+            frm = int(params.get("frm", -1))
+            to = int(params.get("to", -1))
+        except (TypeError, ValueError):
+            return 3
+        refusal = hn.apply_move(state, frm, to, context.member_openid)
+        if refusal:
+            # 非法走法只回一个 toast，不浪费一条被动回复
+            logger.info("[HornChess] Rejected %s→%s: %s",
+                        hn.name_of(frm), hn.name_of(to), refusal)
+            return 4
+        if not hn.is_over(state) and state["turn"] == hn.BULL:
+            # 牛由 AI 走。查表求解是 O(1) 的（局面只有几百个，开局算一次就缓存），
+            # 不需要像国际象棋那样丢进线程。
+            hn.ai_move(state)
+        self._matches.touch(state)
+        try:
+            await self._send_hornchess_card(context.origin, state,
+                                           client=context.client,
+                                           interaction=context.interaction)
+        except Exception:
+            logger.exception("[HornChess] Failed to refresh board")
+            return 1
+        if hn.is_over(state):
+            self._matches.pop(context.origin)
+            self._avatars.pop(context.origin, None)
+        return 0
+
+    async def _send_hornchess_card(self, origin: str, state: dict[str, Any],
+                                   client=None, interaction=None,
+                                   msg_id: str | None = None) -> None:
+        from .games import hornchess_render as hr
+
+        await self._refresh_labels_from_origin(origin, state)
+        await self._send_image_card(
+            origin, state, hr.render_board(state, banner=False),
+            hn.SPEC, hn.build_board_card, tag="HornChess",
+            client=client, interaction=interaction, msg_id=msg_id,
+        )
 
     # --- chess (picture board, quote-to-move) -------------------------------
 
@@ -1376,7 +1524,8 @@ class TicTacToePlugin(Star):
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         state = self._matches.get(origin)
-        if state is None or state.get("game") not in ("gomoku", "animalchess", "chess"):
+        if state is None or state.get("game") not in (
+                "gomoku", "animalchess", "chess", "hornchess"):
             yield event.plain_result("本群当前没有图片棋盘对局。")
             return
         if state.get("phase") == gk.PHASE_WAITING:
@@ -1391,6 +1540,8 @@ class TicTacToePlugin(Star):
                 await self._send_animalchess_card(origin, state, msg_id=msg_id)
             elif state.get("game") == "chess":
                 await self._send_chess_card(origin, state, msg_id=msg_id)
+            elif state.get("game") == "hornchess":
+                await self._send_hornchess_card(origin, state, msg_id=msg_id)
             else:
                 await self._send_picture_board(origin, state, msg_id=msg_id)
         except Exception as exc:
@@ -1401,6 +1552,46 @@ class TicTacToePlugin(Star):
         filter.PlatformAdapterType.QQOFFICIAL
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
     )
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("认输", alias={"resign", "投子"})
+    async def resign(self, event: AstrMessageEvent):
+        """/认输 —— 结束本群的对局。
+
+        国际象棋那种"棋盘上没有按钮"的棋，如果没有这条命令，玩家想停就只能等
+        它超时；而这棋的每张卡片都带「结束对局」按钮，唯独它没有。
+        """
+        event.stop_event()
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        state = self._matches.get(origin)
+        if state is None:
+            yield event.plain_result("本群当前没有进行中的对局。")
+            return
+        name = str(state.get("display_name") or "对局")
+        self._matches.pop(origin)
+        self._avatars.pop(origin, None)
+        yield event.plain_result(f"已结束本群的{name}。")
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("牛角棋", alias={"hornchess", "niujiao", "钻牛角", "赶牛"})
+    async def hornchess_from_command(self, event: AstrMessageEvent):
+        """/牛角棋 —— 打开牛角棋卡片。按钮走棋，不用打字。"""
+        async for result in self._lobby_from_command(event, hn.SPEC):
+            yield result
+
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL
         | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
