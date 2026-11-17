@@ -573,10 +573,6 @@ class TicTacToePlugin(Star):
             return 1
         state = hn.new_state(mode, context.member_openid,
                              self._level(context.origin, hn.SPEC))
-        # 严格版（人只能朝尖走）没有做成配置项：这个仓库有一条既有约定——
-        # 配置里只放通用项，不堆各棋种的开关。真要严格版就改
-        # games/hornchess.py 里的 STRICT_FORWARD 常量，一行的事。
-        state["strict"] = hn.STRICT_FORWARD
         state["display_name"] = hn.SPEC.title
         self._matches.start(context.origin, state)
         self._avatars[context.origin] = AvatarCache()
@@ -619,8 +615,8 @@ class TicTacToePlugin(Star):
     async def _act_hornchess_move(self, context, params) -> int:
         """棋盘按钮：一次点击就是一步棋。
 
-        这是牛角棋值得单独做一个的原因——全部点只有 10 个、每方最多 8 种走法，
-        全部塞进 5×5 的键盘绰绰有余。斗兽棋要点两次，国际象棋只能打字，这里
+        这是牛角棋值得单独做一个的原因——7 个点、每方最多 4 种走法，
+        全部塞进键盘绰绰有余。斗兽棋要点两次，国际象棋只能打字，这里
         点一下就完事。
         """
         state = self._matches.get(context.origin)
