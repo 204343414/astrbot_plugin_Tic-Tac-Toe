@@ -149,12 +149,54 @@ def test_farmers_win_by_trapping_the_bull_on_the_tip():
     assert "憋死" in hc.status_text(state)
 
 
-def test_the_bull_wins_when_the_ply_limit_runs_out():
-    """这条是"不许在横杆上无限横走"的闸门，缺了它人可以直接躺赢。"""
+def test_the_ply_limit_is_a_draw():
+    """这条是"不许在横杆上无限横走"的闸门；判和（不是判牛赢）才是平衡的做法。"""
     state = setup("D1", ("B1", "C1"), hc.HUMANS)
     state["plies"] = hc.PLY_LIMIT
-    assert hc.result(state) == hc.BULL
-    assert "步数用完" in hc.status_text(state)
+    assert hc.result(state) == hc.DRAW
+    assert "判和" in hc.status_text(state)
+
+
+def test_a_position_seen_three_times_is_a_draw():
+    """来回横走谁也推进不了 → 三次重复判和，别让玩家干等 60 手。"""
+    state = setup("C1", ("B1", "C1"), hc.HUMANS)
+    assert hc.repetition_count(state) == 1        # 当前局面本身算第一次
+    assert hc.result(state) == ""
+
+    key = hc._key(state)
+    state["history"] = [key]                      # 第二次
+    assert hc.repetition_count(state) == 2
+    assert hc.result(state) == ""
+    state["history"] = [key, key]                 # 第三次 → 判和
+    assert hc.repetition_count(state) == 3
+    assert hc.result(state) == hc.DRAW
+    assert "重复" in hc.status_text(state)
+
+
+def test_shuttling_back_to_the_same_position_counts_as_a_repetition():
+    """真走四步回到原样：人横挪、牛挪开、人挪回、牛挪回 → 计数 +1。
+
+    局面：牛在 E1，两个人分别在 C1、D1，轮到人走。四步之后局面一模一样。
+    """
+    state = setup("E1", ("C1", "D1"), hc.HUMANS)
+    assert hc.repetition_count(state) == 1
+
+    def cycle():
+        assert hc.apply_move(state, hc.INDEX["C1"], hc.INDEX["C2"]) == ""   # 人横挪
+        assert hc.apply_move(state, hc.INDEX["E1"], hc.INDEX["E2"]) == ""   # 牛躲开
+        assert hc.apply_move(state, hc.INDEX["C2"], hc.INDEX["C1"]) == ""   # 人挪回
+        assert hc.apply_move(state, hc.INDEX["E2"], hc.INDEX["E1"]) == ""   # 牛挪回
+
+    cycle()
+    assert (hc.name_of(state["bull"]), tuple(hc.name_of(h) for h in state["humans"]),
+            state["turn"]) == ("E1", ("C1", "D1"), hc.HUMANS)
+    assert hc.repetition_count(state) == 2
+    assert hc.result(state) == ""
+
+    cycle()
+    assert hc.repetition_count(state) == 3
+    assert hc.result(state) == hc.DRAW
+    assert "重复" in hc.status_text(state)
 
 
 def test_status_text_counts_the_remaining_plies():
@@ -168,11 +210,14 @@ def test_the_solver_covers_every_position():
     table = hc._solve()
     expected = 11 * 45 * 2         # 11 个牛位置 × C(10,2) 个人位置 × 2 个走子方
     assert len(table) == expected == 990
-    assert {winner for winner, _ in table.values()} <= {hc.HUMANS, hc.BULL}
+    assert {winner for winner, _ in table.values()} <= {hc.HUMANS, hc.BULL, hc.DRAW}
 
 
 def brute_force(bull, humans, turn, limit=hc.PLY_LIMIT):
-    """独立实现：纯递归 + 步数上限，跟 ``_solve()`` 对拍用。"""
+    """独立实现：纯递归 + 步数上限（超时判和），跟 ``_solve()`` 对拍用。
+
+    返回值是**绝对结论**（``bull`` / ``human`` / ``draw``），和表里的口径一致。
+    """
     from functools import lru_cache
 
     @lru_cache(maxsize=None)
@@ -180,15 +225,20 @@ def brute_force(bull, humans, turn, limit=hc.PLY_LIMIT):
         if bull in hc.ESCAPE_POINTS:
             return hc.BULL
         if left <= 0:
-            return hc.BULL
+            return hc.DRAW
         occupied = {bull, *humans}
         if turn == hc.BULL:
             targets = [j for j in hc.neighbors(bull) if j not in occupied]
             if not targets:
                 return hc.HUMANS
-            if any(walk(j, humans, hc.HUMANS, left - 1) == hc.BULL for j in targets):
-                return hc.BULL
-            return hc.HUMANS
+            best = hc.HUMANS                 # 牛走：取对自己最好的结论
+            for j in targets:
+                outcome = walk(j, humans, hc.HUMANS, left - 1)
+                if outcome == hc.BULL:
+                    return hc.BULL
+                if outcome == hc.DRAW:
+                    best = hc.DRAW
+            return best
         moves = []
         for piece in humans:
             for j in hc.forward_targets(piece):
@@ -199,9 +249,14 @@ def brute_force(bull, humans, turn, limit=hc.PLY_LIMIT):
                 moves.append(tuple(sorted(updated)))
         if not moves:
             return hc.BULL
-        if any(walk(bull, hs, hc.BULL, left - 1) == hc.HUMANS for hs in moves):
-            return hc.HUMANS
-        return hc.BULL
+        best = hc.BULL                       # 人走：取对自己最好的结论
+        for hs in moves:
+            outcome = walk(bull, hs, hc.BULL, left - 1)
+            if outcome == hc.HUMANS:
+                return hc.HUMANS
+            if outcome == hc.DRAW:
+                best = hc.DRAW
+        return best
 
     return walk(bull, humans, turn, limit)
 
@@ -215,30 +270,29 @@ def brute_force(bull, humans, turn, limit=hc.PLY_LIMIT):
     (6, (0, 1), hc.HUMANS),
 ])
 def test_the_table_agrees_with_a_dumb_brute_force(bull, humans, turn):
-    table = hc._solve()[(bull, humans, turn)][0]
-    assert table == brute_force(bull, humans, turn)
+    """穷举表和一套独立实现必须给出同一个结论（赢／输／和）。"""
+    assert hc._solve()[(bull, humans, turn)][0] == brute_force(bull, humans, turn)
 
 
-def test_on_the_eleven_point_board_the_bull_wins_perfect_play():
-    """把"这棋到底平衡吗"钉死：完美对弈是牛胜，人赢只能靠牛犯错。
+def test_perfect_play_on_the_eleven_point_board_is_a_draw():
+    """把"这棋到底平衡吗"钉死：超时判和的前提下，完美对弈是**和棋**。
 
-    这条看起来像在给"人赢不了"背书，其实是**产品决策的依据**：既然 11 点盘上
-    牛不失误就赢，AI 的困难档就必须留一点犯错空间（见 LEVEL_BLUNDER），
-    否则玩家永远赢不了——那不是难度是堵墙。
+    这才是"人只能前进 + 不许无限横走"这组规则的真实结论：谁失误谁输，和井字棋
+    一个性质。开局三步里走错任何一步，牛就赢了（见下面的断言）。
     """
     from collections import Counter
 
-    table = hc._solve()
-    tally = Counter(winner for winner, _ in table.values())
-    assert tally[hc.BULL] == 954 and tally[hc.HUMANS] == 36
+    tally = Counter(winner for winner, _ in hc._solve().values())
+    assert (tally[hc.BULL], tally[hc.HUMANS], tally[hc.DRAW]) == (777, 36, 177)
 
     state = fresh()
-    assert hc.solve_state(state) == hc.BULL
+    assert hc.solve_state(state) == hc.DRAW
     assert len(hc.legal_moves(state)) == 3      # 开局人只有三步可走
+    # 和棋是个"稳态"：开局这三步都还是和棋。人一旦偏离最优，牛就有机会。
     for _, frm, to in hc.legal_moves(state):
         probe = fresh()
         assert hc.apply_move(probe, frm, to) == ""
-        assert hc.solve_state(probe) == hc.BULL
+        assert hc.solve_state(probe) == hc.DRAW
 
 
 def test_hard_is_flawless_and_the_weaker_levels_are_not():
@@ -329,7 +383,7 @@ def test_hard_never_turns_a_result_around_on_any_position():
         if hc.result(state):
             continue
         hc.ai_move(state, rng)
-        # 走完轮到对手，所以"对手的结论"应该还是原来那个赢家
+        # 走完轮到对手；最优解应当让"局面的绝对结论"保持不变
         if hc.solve_state(state) != winner:
             flipped.append((bull, humans, turn))
     assert flipped == []
@@ -527,4 +581,4 @@ def test_the_two_farmers_keep_their_own_emoji_slots():
     assert state["humans"] == [man, hc.INDEX["E2"]]
     assert state["humans"][0] > state["humans"][1]      # 故意是"乱序"的
     # 状态键照样按位置排序，求解表不受槽位顺序影响
-    assert hc.solve_state(state) in (hc.BULL, hc.HUMANS)
+    assert hc.solve_state(state) in (hc.BULL, hc.HUMANS, hc.DRAW)

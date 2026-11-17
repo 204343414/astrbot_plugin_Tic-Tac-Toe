@@ -37,27 +37,42 @@ A1-B2-C2-D2-E2-F2（编号 1,3,5,7,9,11），横杆两端编号差 1，斜线两
 * 牛无路可走 → **人赢**（把牛憋死在牛角尖上）。
 * 牛走到 F1／F2 → **牛赢**（冲出牛角）。人要往尖上赶就必然要让开底角，
   所以"该不该让、什么时候让"才是这个棋真正的博弈点。
-* 步数用完（``PLY_LIMIT``）还没困住 → **牛赢**（民间"多少步没围住就算牛赢"）。
-  这条必须有，否则人可以在横杆上无限横走，一局棋直接摆烂。
+* **三次重复局面** → **和棋**（和象棋一样）。两边在横杆上来回晃、谁也推进不了，
+  这种局面本来就已经和了，没必要让玩家干等。
+* 步数用完（``PLY_LIMIT``）还没困住 → **和棋**（兜底闸门，防止无限横走）。
+
+判和而不是"判牛赢"是有讲究的：民间有的地方判"没围住算牛赢"，那样完美对弈就是
+牛必胜，玩家执人怎么下都赢不了——见下面的平衡表。
 
 关于平衡（穷举 990 个局面得出的结论，别改规则前先看这里）
 ----------------------------------------------------------
-11 点盘上牛**前后左右自由**、人**不能后退**，穷举结果是：990 个局面里
-牛胜 954、人胜 36——**牛只要不犯错就永远跑得掉**。所以这个棋里"人赢"实际
-取决于牛犯错：
+把全表穷举一遍，三种"步数用完怎么算"的结果完全不一样：
+
+========================  ==========  ==========  ======
+步数用完怎么算           开局结果     牛胜        人胜／和
+========================  ==========  ==========  ======
+判牛赢（民间的一种说法）  牛胜         954         36 / 0
+**判和（本插件）**        **和棋**    777         **36 / 177**
+========================  ==========  ==========  ======
+
+也就是说：**这块盘在"人只能前进 + 超时判和"下是平衡的**——完美对弈是和棋，
+谁失误谁输，和井字棋一个性质。玩家执人有真赢面（36 个局面），牛也有赢面，
+只是两边都不能走错。
+
+（"超时判牛赢"那一版里牛胜 954，玩家执人怎么下都赢不了，AI 再聪明也救不回来。）
+
+AI 难度就是按这个搭的：
 
 =========  ===============  ==========================
-难度        牛的犯错概率      实际体验
+难度        犯错概率         实际体验（玩家执人）
 =========  ===============  ==========================
-简单        45%              人大多能围住
-普通        22%              互有胜负
-困难        8%               牛几乎不失误，很难赢
+简单        45%              人大多能赢（实测 30/30）
+普通        22%              互有胜负（实测 27/30 人胜）
+困难        0%               谁也赢不了谁——会打成和棋
 =========  ===============  ==========================
 
-（困难档也留一点犯错空间，否则在 11 点盘上是"永远赢不了"，那不是难度是堵墙。）
-想要"人能凭本事赢"的版本，把 ``FARMERS_MAY_RETREAT`` 改成 ``True``：穷举显示
-人可进退时局面直接翻过来，人是必胜方。
-
+困难档下的是穷举表里的**最优解**：能赢就挑最快的赢法，要输就挑最慢的输法，
+能守和就守和。所以执人打困难是"和棋"，不是"必输"。
 AI
 --
 局面只有 990 个，**穷举比搜索强**：逆向分析一次性把所有局面的胜负和"几步见分晓"
@@ -118,9 +133,13 @@ PHASE_PLAYING = "playing"
 #: 牛"冲出牛角"的落点：**底部两个角**。民间原话是"到达牛角底部任意一角"。
 ESCAPE_POINTS = (9, 10)     # F1、F2
 
-#: 一手 = 一方走一步。走这么多手还没困住牛就判牛赢（民间规矩），
-#: 同时也是"不许在横杆上无限横走"的闸门。民间给的口径是"约 2×点数+3 步"，
-#: 11 点盘就是 25 手左右，这里放宽到 60 手，别让人还没围上就被判输。
+#: 一手 = 一方走一步。走这么多手还没困住牛就**判和**，同时也是"不许在横杆上
+#: 无限横走"的闸门。民间口径是"约 2×点数+3 步"，11 点盘就是 25 手左右。
+#:
+#: 60 不是拍的：穷举表里任何**已经分出胜负**的局面，最多再走 12 手就见分晓
+#: （牛胜最深 12、人胜最深 11），所以这条闸门永远不会把能赢的局掐掉；但把"对手
+#: 走错之后才出现的"胜势真正走完，前后加起来可能要四五十手，所以留到 60。
+#: 试过收紧到 30：实测胜势常常来不及走完就被判和，反而把局面搅浑了。
 PLY_LIMIT = 60
 
 #: True 时人也能后退。默认 False（民间规矩：人只能往前赶）。
@@ -249,6 +268,7 @@ def apply_move(state: dict[str, Any], frm: int, to: int,
 
 def _commit(state: dict[str, Any], frm: int, to: int) -> None:
     """纯落子，不校验（AI 也走这条路，校验会把 AI 挡在"不是你的回合"上）。"""
+    before = _key(state)          # 走之前的局面，留给"三次重复判和"用
     side = state["turn"]
     if side == BULL:
         state["bull"] = to
@@ -261,19 +281,36 @@ def _commit(state: dict[str, Any], frm: int, to: int) -> None:
         state["turn"] = BULL
     state["last_move"] = {"side": side, "frm": frm, "to": to}
     state["plies"] = int(state.get("plies", 0)) + 1
-    state["history"] = list(state.get("history") or []) + [_key(state)]
+    state["history"] = list(state.get("history") or []) + [before]
 
 
 # --- 胜负 -------------------------------------------------------------------
 
+DRAW = "draw"
+
+#: 同一个局面出现这么多次就判和（和象棋的三次重复同理）。
+REPEAT_LIMIT = 3
+
+
+def repetition_count(state: dict[str, Any]) -> int:
+    """当前局面在这局棋里出现过几次（含这一次）。
+
+    ``history`` 记的是**每一步走之前的局面**，所以"现在这个局面"不在里面，+1 就行。
+    """
+    key = _key(state)
+    return 1 + sum(1 for past in (state.get("history") or []) if past == key)
+
+
 def result(state: dict[str, Any]) -> str:
-    """``""`` 未结束；否则 ``bull`` / ``human``。"""
+    """``""`` 未结束；否则 ``bull`` / ``human`` / ``draw``。"""
     if state["bull"] in ESCAPE_POINTS:
         return BULL                       # 牛冲出牛角
     if not legal_moves(state):
         return HUMANS if state["turn"] == BULL else BULL
+    if repetition_count(state) >= REPEAT_LIMIT:
+        return DRAW                       # 三次重复 = 和棋
     if int(state.get("plies", 0)) >= PLY_LIMIT:
-        return BULL                       # 拖到步数用完 = 牛撑住了
+        return DRAW                       # 步数用完还没围住 = 和棋
     return ""
 
 
@@ -295,6 +332,10 @@ def status_text(state: dict[str, Any]) -> str:
         return f"{MARKS[BULL]} 步数用完牛还没被围住，牛方获胜！"
     if outcome == HUMANS:
         return f"🎉 {MARKS[HUMANS]} 把牛憋死在牛角尖上，赶牛的人获胜！"
+    if outcome == DRAW:
+        if repetition_count(state) >= REPEAT_LIMIT:
+            return "🤝 同一个局面重复了三次，判和。"
+        return "🤝 步数用完还没围住牛，判和。"
 
     turn = state["turn"]
     tail = f"（还剩 {plies_left(state)} 手）"
@@ -390,19 +431,19 @@ def _solve() -> dict[tuple, tuple[str, int]]:
                 if remaining[parent] == 0:
                     resolved[parent] = (winner, depth + 1)
                     queue.append(parent)
-    # 剩下的是"谁也赢不了"的循环局面：拖到步数用完，算牛赢。
+    # 剩下的是"谁也赢不了、只能在横杆上兜圈"的局面 = 和棋（步数用完判和）。
     for state in states:
-        resolved.setdefault(state, (BULL, PLY_LIMIT))
+        resolved.setdefault(state, (DRAW, PLY_LIMIT))
     return resolved
 
 
 def solve_state(state: dict[str, Any]) -> str:
-    return _solve().get(_key(state), (BULL, PLY_LIMIT))[0]
+    return _solve().get(_key(state), (DRAW, PLY_LIMIT))[0]
 
 
 def solve_depth(state: dict[str, Any]) -> int:
-    """从现在起最快（对轮到走的一方）几步见分晓。"""
-    return _solve().get(_key(state), (BULL, PLY_LIMIT))[1]
+    """从现在起最快（对轮到走的一方）几步见分晓；和棋按步数上限算。"""
+    return _solve().get(_key(state), (DRAW, PLY_LIMIT))[1]
 
 
 # --- AI ---------------------------------------------------------------------
@@ -423,10 +464,11 @@ def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, 
     胜负 2 赢 / 0 输。第二项就是穷举表里那个"几步见分晓"，但**方向要按胜负调**：
 
     * 能赢 → 越早赢越好（步数小），所以取负号；
+    * 能和 → 也算不亏，早点收工；
     * 会输 → 越晚输越好（步数大），所以保留原值。
 
-    这两条合起来才是"最优"——之前不分方向、一律挑步数最大的，结果必胜的时候
-    AI 会挑最慢的赢法，看着像在磨洋工。
+    合起来才是"最优"——之前不分方向、一律挑步数最大的，结果必胜的时候 AI 会挑
+    最慢的赢法，看着像在磨洋工。和棋算 1 分：能守和就不许输。
     """
     side, frm, to = move
     if side == BULL:
@@ -435,10 +477,12 @@ def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, 
         humans = list(state["humans"])
         humans[humans.index(frm)] = to
         key = (state["bull"], tuple(sorted(humans)), BULL)
-    winner, depth = _solve().get(key, (BULL, PLY_LIMIT))
+    winner, depth = _solve().get(key, (DRAW, PLY_LIMIT))
     if winner == side:
         return 2, -depth          # 赢：越快越好
-    return 0, depth               # 输：越慢越好（拖到步数用完也是牛赢）
+    if winner == DRAW:
+        return 1, -depth          # 和：不亏，早点收工
+    return 0, depth               # 输：越慢越好（拖到步数上限就是和棋）
 
 
 def ai_move(state: dict[str, Any], rng: random.Random | None = None) -> tuple[int, int] | None:
