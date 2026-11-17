@@ -16,6 +16,7 @@ Design constraints that shaped it (see the Hub's docs/EPHEMERAL_CARDS.md):
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import os
@@ -28,6 +29,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .games import animalchess as ach
+from .games import chess as ch
 from .games import gomoku as gk
 from .games import lobby
 from .games import tictactoe as ttt
@@ -162,6 +164,8 @@ class TicTacToePlugin(Star):
              self._act_lobby_gomoku),
             ("animalchess.lobby", "🐯 斗兽棋", "打开斗兽棋卡片：人机 / 群友 / 三档难度。",
              self._act_lobby_animalchess),
+            ("chess.lobby", "♔ 国际象棋", "打开国际象棋卡片：人机 / 群友 / 三档难度。",
+             self._act_lobby_chess),
 
             ("tictactoe.start_ai", "井字棋：人机对战", "由井字棋卡片触发。", self._act_start_ai),
             ("tictactoe.start_pvp", "井字棋：群友对战", "由井字棋卡片触发。", self._act_start_pvp),
@@ -189,6 +193,17 @@ class TicTacToePlugin(Star):
             ("animalchess.join", "斗兽棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘图。",
              self._act_animalchess_join),
             ("animalchess.quit", "斗兽棋结束对局", "结束当前群的斗兽棋对局。", self._act_quit),
+
+            ("chess.start_ai", "国际象棋：人机对战", "由国际象棋卡片触发。",
+             self._act_chess_ai),
+            ("chess.start_pvp", "国际象棋：群友对战", "由国际象棋卡片触发。",
+             self._act_chess_pvp),
+            ("chess.set_level", "国际象棋：切换难度", "由国际象棋卡片触发。",
+             self._act_set_level_chess),
+            ("chess.join", "国际象棋：加入对战", "由等待卡片触发，入座后才发第一张棋盘。",
+             self._act_chess_join),
+            ("chess.quit", "国际象棋结束对局", "结束当前群的国际象棋对局。",
+             self._act_quit),
         ]
         for action_id, title, description, callback in specs:
             hub.actions.register(ActionSpec(
@@ -279,6 +294,9 @@ class TicTacToePlugin(Star):
     async def _act_lobby_animalchess(self, context, params) -> int:
         return await self._open_lobby(context, ach.SPEC)
 
+    async def _act_lobby_chess(self, context, params) -> int:
+        return await self._open_lobby(context, ch.SPEC)
+
     async def _open_lobby(self, context, spec) -> int:
         """Re-send a game's entry card. Each game owns its own; neither is a
         menu of the other."""
@@ -302,6 +320,9 @@ class TicTacToePlugin(Star):
 
     async def _act_set_level_animalchess(self, context, params) -> int:
         return await self._set_level(context, ach.SPEC, params)
+
+    async def _act_set_level_chess(self, context, params) -> int:
+        return await self._set_level(context, ch.SPEC, params)
 
     async def _set_level(self, context, spec, params) -> int:
         """Difficulty is remembered per group *and per game*:井字棋困难 and
@@ -494,6 +515,80 @@ class TicTacToePlugin(Star):
                                           interaction=context.interaction)
         except Exception:
             logger.exception("[Gomoku] Failed to open board after join")
+            return 1
+        return 0
+
+    # --- chess (picture board, quote-to-move) -------------------------------
+
+    async def _act_chess_ai(self, context, params) -> int:
+        return await self._start_chess(context, ch.MODE_AI)
+
+    async def _act_chess_pvp(self, context, params) -> int:
+        return await self._start_chess(context, ch.MODE_PVP)
+
+    async def _start_chess(self, context, mode: str) -> int:
+        busy = self._matches.busy_reason(context.origin)
+        if busy:
+            logger.info("[Chess] %s", busy)
+            return 2
+        reason = await self._image_host_or_reason()
+        if reason:
+            logger.warning("[Chess] Refusing to start: %s", reason)
+            try:
+                await self._send_card(context, {
+                    "id": "chess_unavailable",
+                    "markdown": "\n".join([
+                        "# 国际象棋暂时开不了",
+                        f"**{reason}**",
+                        "",
+                        "棋盘是一张带图的卡片，图片要有地方安放才能开局。"
+                        "把 Hub 升级到 0.24 就可以直接存进 QQ 素材库，"
+                        "不再需要公网图床。",
+                    ]),
+                    "rows": [],
+                    "ttl_seconds": 600,
+                }, session_id=self._ui_session(context.origin, ch.SPEC))
+            except Exception:
+                logger.exception("[Chess] Failed to explain the refusal")
+            return 1
+        state = ch.new_state(mode, context.member_openid,
+                             self._level(context.origin, ch.SPEC))
+        state["display_name"] = ch.SPEC.title
+        self._matches.start(context.origin, state)
+        self._avatars[context.origin] = AvatarCache()
+        try:
+            if mode == ch.MODE_PVP:
+                label = await self._label_of(context, context.member_openid)
+                await self._send_card(
+                    context, ch.build_waiting_card(state, label),
+                    session_id=self._ui_session(context.origin, ch.SPEC),
+                )
+                return 0
+            await self._send_chess_card(context.origin, state,
+                                       client=context.client,
+                                       interaction=context.interaction)
+        except Exception:
+            logger.exception("[Chess] Failed to open board")
+            self._matches.pop(context.origin)
+            return 1
+        return 0
+
+    async def _act_chess_join(self, context, params) -> int:
+        state = self._matches.get(context.origin)
+        if state is None or state.get("game") != "chess":
+            return 3
+        if state.get("phase") != ch.PHASE_WAITING:
+            return 3
+        if context.member_openid == state["players"].get(ch.WHITE, ""):
+            return 4
+        state["players"][ch.BLACK] = context.member_openid
+        state["phase"] = ch.PHASE_PLAYING
+        try:
+            await self._send_chess_card(context.origin, state,
+                                       client=context.client,
+                                       interaction=context.interaction)
+        except Exception:
+            logger.exception("[Chess] Failed to open board after join")
             return 1
         return 0
 
@@ -845,27 +940,53 @@ class TicTacToePlugin(Star):
     async def _send_animalchess_card(self, origin: str, state: dict[str, Any],
                                      client=None, interaction=None,
                                      msg_id: str | None = None) -> None:
-        """Send the board as a single card embedding the board image and interactive buttons."""
+        """斗兽棋：一张带按钮的卡片棋盘。"""
         from .games import animalchess_render as ar
 
+        await self._refresh_labels_from_origin(origin, state)
+        await self._send_image_card(
+            origin, state, ar.render_board(state, banner=False),
+            ach.SPEC, ach.build_board_card, tag="AnimalChess",
+            client=client, interaction=interaction, msg_id=msg_id,
+        )
+
+    async def _send_chess_card(self, origin: str, state: dict[str, Any],
+                               client=None, interaction=None,
+                               msg_id: str | None = None) -> None:
+        """国际象棋：图片棋盘，走法靠引用回复（64 格放不下按钮）。"""
+        from .games import chess_render as cr
+
+        await self._refresh_labels_from_origin(origin, state)
+        await self._send_image_card(
+            origin, state, cr.render_board(state, banner=False),
+            ch.SPEC, ch.build_board_card, tag="Chess",
+            client=client, interaction=interaction, msg_id=msg_id,
+        )
+
+    async def _send_image_card(self, origin: str, state: dict[str, Any],
+                               image: bytes, spec, build_card, *,
+                               tag: str, client=None, interaction=None,
+                               msg_id: str | None = None) -> None:
+        """把一张图片安全的塞进卡片发出去。三个游戏共用这一条路径。
+
+        为什么要抽出来：卡片里的图片经过的坑（腾讯抓不到、转存失败、素材额度）
+        和"是哪个游戏"完全无关。每个游戏各写一份，等于每个游戏各踩一次。
+
+        顺序按"对外部世界有多少依赖"排：
+
+          1. QQ 素材库 —— 字节直接进腾讯的存储，卡片里写 qqbot-media 引用。
+             不需要公网地址、不需要隧道、不需要 DNS。
+          2. Hub 图床的公网 URL —— 老路子，老版本 Hub 的兜底。
+          3. 无图卡片 + 独立图片消息 —— 前两条都被 QQ 拒了才走到这里。
+        """
         hub = self._get_hub()
         if hub is None:
             raise RuntimeError("QQ Official Hub 不可用")
-        await self._refresh_labels_from_origin(origin, state)
-
-        image = ar.render_board(state, banner=False)
         event_id = (
             self._hub_module(hub, "passive_reply").passive_event_id(interaction)
             if interaction is not None else None
         )
 
-        # Two ways to get a picture into a card, tried in order of how little
-        # they depend on the outside world:
-        #
-        #   1. QQ 素材库 —— 字节直接进腾讯的存储，卡片里写 qqbot-media 引用。
-        #      不需要公网地址、不需要隧道、不需要 DNS。之前那种"卡片裂图"
-        #      根本不会发生，因为腾讯不需要来我们这边抓任何东西。
-        #   2. Hub 图床 —— 老路子，公网 URL。留作兜底：老版本 Hub 没有素材接口。
         candidates: list[tuple[str, str]] = []       # (图片地址, 素材 id)
         upload = getattr(hub, "publish_image_material", None)
         if upload is not None:
@@ -875,35 +996,33 @@ class TicTacToePlugin(Star):
                     candidates.append((str(material["url"]),
                                        str(material.get("image_id") or "")))
             except Exception as exc:
-                logger.warning("[AnimalChess] 素材上传失败，回退图床：%s", exc)
+                logger.warning("[%s] 素材上传失败，回退图床：%s", tag, exc)
         try:
-            host_url = await hub.publish_image_checked(
-                image, slot=f"animalchess:{origin}")
+            host_url = await hub.publish_image_checked(image, slot=f"{spec.key}:{origin}")
             if host_url:
                 candidates.append((str(host_url), ""))
         except Exception as exc:
-            logger.warning("[AnimalChess] 图床发布失败：%s", exc)
+            logger.warning("[%s] 图床发布失败：%s", tag, exc)
         if not candidates:
             raise RuntimeError("棋盘图片无处安放：素材库和图床都不可用")
 
-        # 带图发送，并让 QQ 校验转存结果（verify_image）。不校验时，图片在
-        # 平台内部转存失败的消息照样 200 发出，群里只剩一张裂图 —— 这正是
-        # 之前查了很久的那个"根本读不到"。
-        session_id = self._ui_session(origin, ach.SPEC)
+        # 带图发送并开 verify_image：转存失败会变成明确错误，我们才能换下一个
+        # 来源，而不是把一张裂图交给玩家。
+        session_id = self._ui_session(origin, spec)
         delivered = False
         material_id = ""
         last_error: Exception | None = None
         for url, candidate_material in candidates:
             try:
                 await self._send_card_image(
-                    origin, ach.build_board_card(state, url), hub,
+                    origin, build_card(state, url), hub,
                     client=client, session_id=session_id,
                     event_id=event_id, msg_id=msg_id,
                 )
             except Exception as exc:
                 last_error = exc
-                logger.warning("[AnimalChess] 带图卡片被拒（%s）：%s",
-                               url.split("?")[0], exc)
+                logger.warning("[%s] 带图卡片被拒（%s）：%s",
+                               tag, url.split("?")[0], exc)
                 if candidate_material:
                     await self._release_material(hub, candidate_material,
                                                  client=client, origin=origin)
@@ -913,13 +1032,9 @@ class TicTacToePlugin(Star):
             break
 
         if not delivered:
-            # 最后一条路：这张图在卡片里就是过不去。退回"无图卡片 + 独立图片
-            # 消息" —— 按钮照旧能点，棋盘只是换到另一条消息上。宁可难看，
-            # 也不要让玩家对着裂图猜。
-            logger.warning("[AnimalChess] 带图卡片全部失败，回退无图卡片：%s",
-                           last_error)
+            logger.warning("[%s] 带图卡片全部失败，回退无图卡片：%s", tag, last_error)
             await hub.send_ephemeral_card(
-                origin, ach.build_board_card(state, ""),
+                origin, build_card(state, ""),
                 client=client, session_id=session_id,
                 event_id=event_id, msg_id=msg_id,
                 initiator_openid="", clicker_header="",
@@ -1176,6 +1291,68 @@ class TicTacToePlugin(Star):
             self._matches.pop(origin)
             self._avatars.pop(origin, None)
 
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    # 和五子棋/斗兽棋一样的优先级：要压过 Hub 的兜底面板提示，否则引用的
+    # 走法会先被别的处理器吞掉。
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=200)
+    async def chess_move_by_quote(self, event: AstrMessageEvent):
+        """引用棋盘图回复走法，例如 e2e4、Nf3 式写法不认、但 e2-e4 认。
+
+        为什么不做成按钮：8x8=64 格装不下（QQ 上限 5x5），而且中局里真正合法
+        的走法往往只有二三十种，"先点起点再点终点"要点两次还要重排按钮。打字
+        一行 e2e4 对会下棋的人反而更快——五子棋也是同一个交互。
+        """
+        origin = str(getattr(event, "unified_msg_origin", "") or "")
+        if "GroupMessage" not in origin:
+            return
+        for dead_origin, _ in self._matches.sweep():
+            self._avatars.pop(dead_origin, None)
+            logger.info("[Chess] Match in %s expired",
+                        dead_origin.split(":")[-1][-8:])
+        state = self._matches.get(origin)
+        if state is None or state.get("game") != "chess":
+            return
+        if state.get("phase") == ch.PHASE_WAITING:
+            return          # 对手还没入座，没有棋盘可以引用
+        move = ch.resolve_text(state, event.get_message_str())
+        if move is None:
+            return          # 不是走法（或者不合法），交给别人处理
+
+        if not quoted_message_ids(event):
+            return          # 群里随口打一句 e2e4 不算下棋
+        event.stop_event()
+
+        actor = str(event.get_sender_id() or "")
+        refusal = ch.apply_move(state, move, actor)
+        if refusal:
+            yield event.plain_result(f"❌ {refusal}")
+            return
+        if not ch.is_over(state):
+            # 国际象棋的 AI 是纯 CPU 搜索（困难档约 1.6 秒）。直接在事件循环里
+            # 同步跑会把整个 AstrBot 卡住——期间别的群发消息也要排队。丢到
+            # 线程里跑，代价是这一次 await 多几毫秒的调度开销。
+            await asyncio.to_thread(ch.maybe_ai_move, state)
+        self._matches.touch(state)
+        try:
+            await self._send_chess_card(
+                origin, state,
+                msg_id=str(event.message_obj.message_id or "") or None,
+            )
+        except Exception as exc:
+            logger.exception("[Chess] Failed to refresh board")
+            yield event.plain_result(
+                f"走法已记录（{ch.square_name(move.frm)}→"
+                f"{ch.square_name(move.to)}），但棋盘卡没发出来："
+                f"{self._describe(exc)}\n发送 /棋盘 可以重新出卡。"
+            )
+            return
+        if ch.is_over(state):
+            self._matches.pop(origin)
+            self._avatars.pop(origin, None)
+
     @staticmethod
     def _describe(exc: BaseException) -> str:
         """A one-line cause for chat.
@@ -1199,7 +1376,7 @@ class TicTacToePlugin(Star):
         event.stop_event()
         origin = str(getattr(event, "unified_msg_origin", "") or "")
         state = self._matches.get(origin)
-        if state is None or state.get("game") not in ("gomoku", "animalchess"):
+        if state is None or state.get("game") not in ("gomoku", "animalchess", "chess"):
             yield event.plain_result("本群当前没有图片棋盘对局。")
             return
         if state.get("phase") == gk.PHASE_WAITING:
@@ -1212,11 +1389,27 @@ class TicTacToePlugin(Star):
             # keeps /棋盘 an actual redraw of what players are looking at.
             if state.get("game") == "animalchess":
                 await self._send_animalchess_card(origin, state, msg_id=msg_id)
+            elif state.get("game") == "chess":
+                await self._send_chess_card(origin, state, msg_id=msg_id)
             else:
                 await self._send_picture_board(origin, state, msg_id=msg_id)
         except Exception as exc:
             logger.exception("[Games] Failed to redraw board")
             yield event.plain_result(f"出图失败：{self._describe(exc)}")
+
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.platform_adapter_type(
+        filter.PlatformAdapterType.QQOFFICIAL
+        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
+    )
+    @filter.command("国际象棋", alias={"chess", "gjxq"})
+    async def chess_from_command(self, event: AstrMessageEvent):
+        """/国际象棋 —— 打开国际象棋卡片，由按钮选择对战方式与难度。"""
+        async for result in self._lobby_from_command(event, ch.SPEC):
+            yield result
 
     @filter.platform_adapter_type(
         filter.PlatformAdapterType.QQOFFICIAL

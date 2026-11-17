@@ -150,3 +150,12 @@ GOMOKU = GameSpec(
     host_mark="⚫",
     guest_mark="⚪",
 )
+
+CHESS = GameSpec(
+    key="chess",
+    title="国际象棋",
+    how_to=("棋盘是图片：**引用棋盘图回复走法**（如 e2e4，升变写 e7e8q），"
+            "把对方的王将死即胜。"),
+    host_mark="⚪",
+    guest_mark="⚫",
+)
