@@ -381,3 +381,73 @@ def test_board_card_drops_the_buttons_when_the_game_is_over():
     state = setup("A1", ("B1", "B2"), hc.BULL)
     assert hc.is_over(state)
     assert hc.build_board_card(state, "https://example.invalid/a.jpg")["rows"] == []
+
+
+# --- 出图：参照系坐标与 emoji 素材 ------------------------------------------
+
+def test_the_picture_uses_every_point_of_the_reference_board():
+    from games import hornchess_render as hr
+
+    assert set(hr.POINTS) == set(hc.NAMES)
+    assert all(0.0 < nx < 1.0 and 0.0 < ny < 1.0
+               for nx, ny in hr.POINTS.values())
+    assert len(hr.OUTLINE) >= 40                 # 轮廓是沿着参照图取的曲线，不是多边形
+    assert all(0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0 for nx, ny in hr.OUTLINE)
+
+
+def test_every_point_lands_inside_the_canvas():
+    from games import hornchess_render as hr
+
+    for index in range(len(hc.NAMES)):
+        x, y = hr.point_xy(index)
+        assert 0 < x < hr.WIDTH and 0 < y < hr.HEIGHT, (hc.name_of(index), x, y)
+
+
+def test_the_rendered_picture_is_the_size_the_card_declares():
+    from PIL import Image
+    import io
+
+    from games import hornchess_render as hr
+
+    data = hr.render_board(fresh())
+    image = Image.open(io.BytesIO(data))
+    assert image.size == (hc.CARD_IMAGE_WIDTH, hc.CARD_IMAGE_HEIGHT)
+
+
+def test_the_emoji_assets_ship_with_the_plugin():
+    """字体画不出彩色 emoji，只能贴图——素材缺了棋子就变回汉字，所以钉住。"""
+    from PIL import Image
+
+    from games import hornchess_render as hr
+
+    for asset in ("cow", *hc.PIECE_ASSETS):
+        path = hr.ASSET_DIR / f"{asset}.png"
+        assert path.exists(), path
+        with Image.open(path) as image:
+            assert image.mode == "RGBA"
+
+
+def test_the_board_still_renders_without_the_emoji_assets(monkeypatch, tmp_path):
+    from games import hornchess_render as hr
+
+    monkeypatch.setattr(hr, "ASSET_DIR", tmp_path / "缺素材")
+    hr._emoji.cache_clear()
+    try:
+        assert hr.render_board(fresh())[:2] == b"\xff\xd8"      # 还是张 JPEG
+    finally:
+        hr._emoji.cache_clear()
+
+
+def test_the_two_farmers_keep_their_own_emoji_slots():
+    """👨/👩 按槽位固定，互相越过对方也不会换脸（所以 humans 不排序）。"""
+    assert hc.PIECE_MARKS == ("👨", "👩")
+    assert hc.PIECE_ASSETS == ("man", "woman")
+
+    state = fresh()
+    man, woman = state["humans"]
+    # 👩 先往前走一步，编号比 👨 更小——如果拿排序当槽位，两个图标就换脸了
+    assert hc.apply_move(state, woman, hc.INDEX["E2"]) == ""
+    assert state["humans"] == [man, hc.INDEX["E2"]]
+    assert state["humans"][0] > state["humans"][1]      # 故意是"乱序"的
+    # 状态键照样按位置排序，求解表不受槽位顺序影响
+    assert hc.solve_state(state) in (hc.BULL, hc.HUMANS)

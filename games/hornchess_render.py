@@ -1,23 +1,27 @@
-"""把牛角棋棋盘画成图片：照实拍棋盘的样子——一个高瘦、微弯的牛角，6 行 11 个点。
+"""把牛角棋棋盘画成图片：坐标系直接取自用户给的参照图。
 
-和另外几个棋一样，渲染单独一个文件——规则模块要能在没有 Pillow 的环境里跑测试。
+**所有坐标都是从参照图（1280×1164 的白底黑线图）上量出来、再按图宽高归一化的**，
+不是自己摆的几何。换图不用改算法，改下面两张表就行：
 
-画的东西和实拍盘一一对应：
+* ``OUTLINE`` —— 板子的外轮廓（56 个点，从参照图的墨线内侧沿着轮廓等距取）。
+* ``POINTS`` —— 11 个洞眼的位置，键是点名，值是归一化坐标。
 
-* 一块**牛角形的木板**（左边缘微弯、右边缘外张，上端收尖、下端是平的底边）；
-* 板上的 19 条线：左列 5 条、右列 5 条、5 道横杆、4 条平行的长斜线；
-* 11 个洞眼，洞眼旁边标 A1…F2 —— 走法按钮里写的就是这些名字，不标玩家对不上。
+连线的画法还是老规矩：``hornchess.neighbors()`` 决定谁连谁（每点只连编号
+±1／±2 的点），所以 19 条线和参照图一一对应，线上的点也正好落在洞眼上。
 
-坐标是照着用户实拍的照片量出来的相对位置（左列中间往外鼓、右列越往下越靠右），
-所以看起来就是真盘那个"高瘦牛角"，不是对称的等腰三角形。
+棋子用 emoji 位图（``assets/emoji/{cow,man,woman}.png``，OpenMoji，CC BY-SA 4.0），
+用户要求的 🐮 / 👨 / 👩。字体画不出彩色 emoji，所以这里走贴图；图缺失时退化成
+画一个带汉字的棋子，不至于整盘画不出来。
 
-尺寸固定 620×720（竖版，符合牛角的高瘦比例），卡片里声明的像素必须与此完全一致
-（这个坑在斗兽棋上踩过：声明和实际不符会让图片被拉伸，甚至干脆不渲染）。
+尺寸固定 620×720（竖版），卡片里声明的像素必须与此完全一致（这个坑在斗兽棋上
+踩过：声明和实际不符会让图片被拉伸，甚至干脆不渲染）。
 """
 from __future__ import annotations
 
 import io
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
@@ -29,53 +33,83 @@ from .gomoku_render import _font, has_cjk_font
 WIDTH = 620
 HEIGHT = 720
 
-# 每行的纵坐标（第 0 行是牛角尖，最后一行是底角）。
-ROW_TOP = 104.0
-ROW_GAP = 92.0
+#: 参照图的原尺寸（坐标表就是按它归一化的）。
+REF_W = 1280.0
+REF_H = 1164.0
 
-#: 每行的左列／右列横坐标。数是从实拍照片上量的：左列先往右挪、中间往外鼓一点，
-#: 右列越往下越靠右（牛角张开），所以左右不对称——真盘就这样。
-COLUMN_X: tuple[tuple[float, float], ...] = (
-    (170.0, 170.0),
-    (205.0, 262.0),
-    (250.0, 330.0),
-    (282.0, 386.0),
-    (296.0, 424.0),
-    (276.0, 452.0),
+#: 参照图缩到卡片上的比例，以及左上角偏移。
+SCALE = 0.503
+OFFSET_X = 12.0
+OFFSET_Y = 78.0
+
+#: 板子外轮廓，归一化坐标（见模块开头的说明）。
+OUTLINE: tuple[tuple[float, float], ...] = (
+    (0.2219, 0.0146), (0.1685, 0.0189), (0.1164, 0.0266), (0.0659, 0.0387),
+    (0.0196, 0.0559), (0.0614, 0.0911), (0.1024, 0.1281), (0.1425, 0.1678),
+    (0.1810, 0.2103), (0.2172, 0.2543), (0.2500, 0.2998), (0.2801, 0.3466),
+    (0.3068, 0.3949), (0.3297, 0.4450), (0.3487, 0.4968), (0.3638, 0.5504),
+    (0.3750, 0.6058), (0.3814, 0.6634), (0.3844, 0.7225), (0.3828, 0.7823),
+    (0.3773, 0.8403), (0.3680, 0.8965), (0.3925, 0.9227), (0.4475, 0.9227),
+    (0.5025, 0.9227), (0.5575, 0.9227), (0.6126, 0.9227), (0.6676, 0.9227),
+    (0.7226, 0.9227), (0.7776, 0.9227), (0.8326, 0.9227), (0.8876, 0.9227),
+    (0.9426, 0.9227), (0.9430, 0.8675), (0.9375, 0.8095), (0.9305, 0.7522),
+    (0.9217, 0.6957), (0.9109, 0.6401), (0.8986, 0.5853), (0.8851, 0.5309),
+    (0.8694, 0.4776), (0.8515, 0.4252), (0.8309, 0.3742), (0.8063, 0.3249),
+    (0.7774, 0.2775), (0.7440, 0.2323), (0.7060, 0.1896), (0.6651, 0.1523),
+    (0.6220, 0.1205), (0.5771, 0.0936), (0.5305, 0.0713), (0.4827, 0.0524),
+    (0.4332, 0.0378), (0.3824, 0.0266), (0.3303, 0.0189), (0.2766, 0.0155),
 )
 
-BG = (247, 244, 236)
-WOOD = (238, 226, 198)
-WOOD_EDGE = (206, 186, 146)
-LINE = (128, 104, 72)
-FRAME = (88, 68, 44)
-TEXT = (92, 70, 46)
-FAINT = (170, 156, 132)
+#: 11 个洞眼在参照图上的位置（归一化）。
+POINTS: dict[str, tuple[float, float]] = {
+    "A1": (0.1719, 0.0773),      # 牛角尖
+    "B1": (0.3062, 0.2002),
+    "B2": (0.3969, 0.1117),
+    "C1": (0.4023, 0.3187),
+    "C2": (0.5789, 0.2139),
+    "D1": (0.4695, 0.4630),
+    "D2": (0.7063, 0.3849),
+    "E1": (0.5016, 0.6237),
+    "E2": (0.7789, 0.5842),
+    "F1": (0.4977, 0.8333),      # 底角（牛的出口）
+    "F2": (0.8297, 0.8333),
+}
 
-BULL_FILL = (196, 74, 62)       # 牛：红
-BULL_RING = (128, 40, 32)
-HUMAN_FILL = (86, 138, 196)     # 人：蓝
-HUMAN_RING = (44, 84, 132)
-GLYPH = (252, 248, 240)
+#: 棋子贴图。字体没有彩色 emoji，只能贴图；文件缺失时退化成汉字棋子。
+ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "emoji"
 
+BG = (255, 255, 255)
+BOARD = (255, 255, 255)
+INK = (10, 10, 10)
+LABEL = (90, 90, 90)
+FAINT = (166, 166, 166)
+
+BULL_RING = (196, 74, 62)
+MAN_RING = (44, 92, 150)
+WOMAN_RING = (168, 60, 120)
 LAST_MOVE = (250, 196, 40)
 ESCAPE_RING = (196, 74, 62)
 
-JPEG_QUALITY = 88
+JPEG_QUALITY = 92
 
 #: 棋盘的字体是中文黑体，没有彩色 emoji 和 ZWJ 组合符，画上去就是一串豆腐块。
-#: 状态行里那几个图标（🐂🧑‍🌾）留给 QQ 的 markdown，出图时剔掉。
+#: 状态行里那几个图标留给 QQ 的 markdown，出图时剔掉。
 _ICON_RE = re.compile("[\U0001F000-\U0001FAFF\u200d\ufe0f]+")
 
-DISC_RADIUS = 27
-DOT_RADIUS = 6
+HOLE_RADIUS = 6.5        # 普通洞眼
+CUP_RADIUS = 19.5        # 底角那两个"窝"
+PIECE_RADIUS = 24.0      # 棋子圆的半径
+LINE_WIDTH = 4
+
+
+def _to_canvas(nx: float, ny: float) -> tuple[float, float]:
+    return OFFSET_X + nx * REF_W * SCALE, OFFSET_Y + ny * REF_H * SCALE
 
 
 def point_xy(index: int) -> tuple[float, float]:
-    """点 → 画布坐标。左列贴左边、右列贴右边，行号决定纵坐标。"""
-    depth = hc.DEPTH[index]
-    left, right = COLUMN_X[depth]
-    return (left if hc.column_of(index) == 0 else right), ROW_TOP + depth * ROW_GAP
+    """点 → 画布坐标。"""
+    nx, ny = POINTS[hc.name_of(index)]
+    return _to_canvas(nx, ny)
 
 
 def _edges() -> list[tuple[int, int]]:
@@ -87,98 +121,99 @@ def _edges() -> list[tuple[int, int]]:
     return sorted(seen)
 
 
-def _board_outline() -> list[tuple[float, float]]:
-    """牛角形木板的轮廓：四边各往外让出一点余量，上端是平的（像实拍那块板）。"""
-    lefts = [point_xy(i) for i in range(len(hc.NAMES)) if hc.column_of(i) == 0]
-    rights = [point_xy(i) for i in range(len(hc.NAMES)) if hc.column_of(i) != 0]
-    apex, base = lefts[0], lefts[-1][1] + 58
-    points: list[tuple[float, float]] = [
-        (apex[0] - 56, apex[1] - 30),          # 左上角
-        (rights[0][0] + 20, apex[1] - 30),     # 上沿
-    ]
-    points += [(x + 56, y) for x, y in rights[1:]]        # 右边缘（外张的斜边）
-    points.append((rights[-1][0] + 40, base))             # 右下角
-    points.append((lefts[-1][0] - 44, base))              # 左下角
-    points += [(x - 56, y) for x, y in reversed(lefts[1:])]   # 左边缘（微弯的竖边）
-    return points
+@lru_cache(maxsize=8)
+def _emoji(asset: str, size: int) -> Image.Image | None:
+    path = ASSET_DIR / f"{asset}.png"
+    try:
+        image = Image.open(path).convert("RGBA")
+    except (OSError, ValueError):
+        return None
+    return image.resize((size, size), Image.LANCZOS)
 
 
-def _label_xy(index: int) -> tuple[float, float]:
+def _label_xy(index: int) -> tuple[float, float, str]:
+    """点名的位置：放在棋子之外、板子内侧，别压住线。"""
     x, y = point_xy(index)
-    if hc.DEPTH[index] == 0:
-        return x + 4, y - 46            # 牛角尖的名字放头顶
+    if index == hc.TIP:
+        # 尖点在板子的左上角上，往上写会顶到板边，往左写正好落在板子里
+        return x - 28, y + 2, "rm"
     if hc.column_of(index) == 0:
-        return x - 40, y                # 左列放左边
-    return x + 40, y                    # 右列放右边
+        return x - 40, y, "rm"
+    return x + 40, y, "lm"
 
 
-def _disc(draw: ImageDraw.ImageDraw, index: int, fill: tuple, ring: tuple,
-          glyph: str) -> None:
+def _draw_piece(image: Image.Image, draw: ImageDraw.ImageDraw, index: int,
+                asset: str, glyph: str, ring: tuple) -> None:
     x, y = point_xy(index)
-    draw.ellipse((x - DISC_RADIUS, y - DISC_RADIUS,
-                  x + DISC_RADIUS, y + DISC_RADIUS),
-                 fill=fill, outline=ring, width=4)
-    font = _font(30 if has_cjk_font() else 26)
-    draw.text((x, y), glyph, font=font, anchor="mm", fill=GLYPH)
+    r = PIECE_RADIUS
+    draw.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255),
+                 outline=ring, width=3)
+    size = int(r * 1.95)
+    art = _emoji(asset, size)
+    if art is not None:
+        image.paste(art, (int(x - size / 2), int(y - size / 2)), art)
+    else:
+        draw.text((x, y), glyph, font=_font(int(r * 1.05)),
+                  anchor="mm", fill=ring)
 
 
 def render_board(state: dict[str, Any], banner: bool = True) -> bytes:
     image = Image.new("RGB", (WIDTH, HEIGHT), BG)
     draw = ImageDraw.Draw(image)
 
-    # 木板：牛角形的一块，浅木色 + 一圈深一点的边
-    plate = _board_outline()
-    draw.polygon(plate, fill=WOOD)
-    draw.line(plate + [plate[0]], fill=WOOD_EDGE, width=4, joint="curve")
+    # 板子：白底 + 一圈黑边（和参照图一样的白板黑线）
+    plate = [_to_canvas(nx, ny) for nx, ny in OUTLINE]
+    draw.polygon(plate, fill=BOARD)
+    draw.line(plate + [plate[0]], fill=INK, width=LINE_WIDTH + 1, joint="curve")
 
     # 19 条线
     for a, b in _edges():
-        draw.line([point_xy(a), point_xy(b)], fill=LINE, width=5)
+        draw.line([point_xy(a), point_xy(b)], fill=INK, width=LINE_WIDTH)
 
-    # 底角画个圈：那是牛要冲出去的口子，玩家一眼能看见目标
-    for corner in hc.ESCAPE_POINTS:
-        x, y = point_xy(corner)
-        draw.ellipse((x - 40, y - 40, x + 40, y + 40),
-                     outline=ESCAPE_RING, width=3)
+    # 洞眼：底角画成"窝"（牛要冲出去的口子），其余画成实心小圆
+    for index in range(len(hc.NAMES)):
+        x, y = point_xy(index)
+        if index in hc.ESCAPE_POINTS:
+            draw.ellipse((x - CUP_RADIUS, y - CUP_RADIUS,
+                          x + CUP_RADIUS, y + CUP_RADIUS),
+                         fill=(255, 255, 255), outline=ESCAPE_RING, width=2)
+        draw.ellipse((x - HOLE_RADIUS, y - HOLE_RADIUS,
+                      x + HOLE_RADIUS, y + HOLE_RADIUS), fill=INK)
 
-    # 上一手
+    # 上一手：两个黄圈，谁走到哪儿一眼看见
     last = state.get("last_move") or {}
     for key in ("frm", "to"):
         square = last.get(key)
         if isinstance(square, int) and 0 <= square < len(hc.NAMES):
             x, y = point_xy(square)
-            draw.ellipse((x - 37, y - 37, x + 37, y + 37),
-                         outline=LAST_MOVE, width=6)
+            draw.ellipse((x - PIECE_RADIUS - 5, y - PIECE_RADIUS - 5,
+                          x + PIECE_RADIUS + 5, y + PIECE_RADIUS + 5),
+                         outline=LAST_MOVE, width=4)
 
-    # 洞眼
-    for index in range(len(hc.NAMES)):
-        x, y = point_xy(index)
-        draw.ellipse((x - DOT_RADIUS, y - DOT_RADIUS,
-                      x + DOT_RADIUS, y + DOT_RADIUS), fill=FRAME)
-
-    # 棋子
-    for human in state["humans"]:
-        _disc(draw, human, HUMAN_FILL, HUMAN_RING, "人")
-    _disc(draw, state["bull"], BULL_FILL, BULL_RING, "牛")
+    # 棋子：两个赶牛的人（👨／👩 固定到各自的子）＋ 牛（🐮）
+    for slot, position in enumerate(state["humans"]):
+        _draw_piece(image, draw, position,
+                    hc.PIECE_ASSETS[slot % len(hc.PIECE_ASSETS)],
+                    hc.PIECE_MARKS[slot % len(hc.PIECE_MARKS)],
+                    MAN_RING if slot == 0 else WOMAN_RING)
+    _draw_piece(image, draw, state["bull"], "cow", hc.MARKS[hc.BULL], BULL_RING)
 
     # 点名
-    label_font = _font(22)
+    label_font = _font(19)
     for index, name in enumerate(hc.NAMES):
-        x, y = _label_xy(index)
-        anchor = "mm" if hc.DEPTH[index] == 0 else ("rm" if hc.column_of(index) == 0 else "lm")
-        draw.text((x, y), name, font=label_font, anchor=anchor, fill=TEXT)
+        lx, ly, anchor = _label_xy(index)
+        draw.text((lx, ly), name, font=label_font, anchor=anchor, fill=LABEL)
 
-    # 顶部／底部各一行小字：哪边是尖、哪边是出口，再一行状态
-    small = _font(20)
-    draw.text((WIDTH / 2, 34), "⬆ 牛角尖：人要把牛赶到这里堵死",
+    # 顶部／底部各一行小字，再一行状态
+    small = _font(19)
+    draw.text((WIDTH / 2, 30), "⬆ 牛角尖：人要把牛赶到这儿堵死",
               font=small, anchor="mm", fill=FAINT)
-    draw.text((WIDTH / 2, ROW_TOP + (len(hc.ROWS) - 1) * ROW_GAP + 76),
-              "⬇ 底角＝牛的出口　·　人只能往尖上赶，同杆可横挪",
+    draw.text((WIDTH / 2, HEIGHT - 64), "⬇ 底角＝牛的出口　·　人只能往尖上赶，同一条横杆可左右挪",
               font=small, anchor="mm", fill=FAINT)
     if banner:
         text = _ICON_RE.sub("", hc.status_text(state)).strip()
-        draw.text((WIDTH / 2, HEIGHT - 32), text,
-                  font=_font(26), anchor="mm", fill=TEXT)
+        draw.text((WIDTH / 2, HEIGHT - 30), text,
+                  font=_font(25), anchor="mm", fill=INK)
 
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)

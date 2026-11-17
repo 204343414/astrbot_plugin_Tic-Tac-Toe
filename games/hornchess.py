@@ -96,7 +96,12 @@ COUNT = len(NAMES)
 
 HUMANS = "h"
 BULL = "b"
-MARKS = {HUMANS: "🧑‍🌾", BULL: "🐂"}
+MARKS = {HUMANS: "👨‍👩", BULL: "🐮"}
+
+#: 两枚人子的图标：按 ``state["humans"]`` 里的槽位固定，走得再乱也不会扮演串。
+PIECE_MARKS = ("👨", "👩")
+#: 对应的贴图文件名（字体画不出彩色 emoji，出图时贴 ``assets/emoji/*.png``）。
+PIECE_ASSETS = ("man", "woman")
 SPEC = lobby.HORNCHESS
 
 MODE_AI = "ai"
@@ -156,7 +161,7 @@ def new_state(mode: str, host_openid: str, level: str = "normal") -> dict[str, A
         "mode": mode,
         "turn": HUMANS,
         "bull": TIP,
-        "humans": sorted(ESCAPE_POINTS),      # 两枚人子摆在底角
+        "humans": list(ESCAPE_POINTS),        # 两枚人子摆在底角（顺序＝槽位）
         "players": players,
         "labels": {},
         "level": lobby.normalize_level(level),
@@ -222,7 +227,8 @@ def _commit(state: dict[str, Any], frm: int, to: int) -> None:
     else:
         humans = list(state["humans"])
         humans[humans.index(frm)] = to
-        state["humans"] = sorted(humans)
+        # 不排序：``humans`` 的下标就是"这是人1还是人2"，排序了图标会互换。
+        state["humans"] = humans
         state["turn"] = BULL
     state["last_move"] = {"side": side, "frm": frm, "to": to}
     state["plies"] = int(state.get("plies", 0)) + 1
@@ -254,16 +260,17 @@ def status_text(state: dict[str, Any]) -> str:
     outcome = result(state)
     if outcome == BULL:
         if state["bull"] in ESCAPE_POINTS:
-            return "🐂 牛从底角冲出牛角，牛方获胜！"
+            return f"{MARKS[BULL]} 牛从底角冲出牛角，牛方获胜！"
         if not legal_moves(state):
-            return "🐂 赶牛的人动不了了，牛方获胜！"
-        return "🐂 步数用完牛还没被围住，牛方获胜！"
+            return f"{MARKS[BULL]} 赶牛的人动不了了，牛方获胜！"
+        return f"{MARKS[BULL]} 步数用完牛还没被围住，牛方获胜！"
     if outcome == HUMANS:
         return "🎉 牛被憋死在牛角尖上，赶牛的人获胜！"
     turn = state["turn"]
     tail = f"（还剩 {plies_left(state)} 手）"
     if state["mode"] == MODE_AI:
-        base = "轮到你赶牛 🧑‍🌾" if turn == HUMANS else "牛在找出路 🐂…"
+        base = ("轮到你赶牛 👨‍👩" if turn == HUMANS
+                else f"{MARKS[BULL]} 牛在找出路…")
     else:
         base = f"轮到 {MARKS[turn]} {'赶牛' if turn == HUMANS else '牛'} 走棋"
     return base + tail
@@ -451,11 +458,12 @@ def _move_buttons(state: dict[str, Any]) -> list[list[dict[str, Any]]]:
         }
 
     if state["turn"] == BULL:
-        rows.append([button(f"🐂 {name_of(frm)}→{name_of(to)}", frm, to)
+        rows.append([button(f"{MARKS[BULL]} {name_of(frm)}→{name_of(to)}", frm, to)
                      for _, frm, to in moves])
     else:
-        for piece in sorted(state["humans"]):
-            mine = [button(f"🧑‍🌾 {name_of(frm)}→{name_of(to)}", frm, to)
+        for slot, piece in enumerate(state["humans"]):
+            mark = PIECE_MARKS[slot % len(PIECE_MARKS)]
+            mine = [button(f"{mark} {name_of(frm)}→{name_of(to)}", frm, to)
                     for _, frm, to in moves if frm == piece]
             if mine:
                 rows.append(mine)
