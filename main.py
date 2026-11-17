@@ -167,7 +167,7 @@ class TicTacToePlugin(Star):
              self._act_lobby_animalchess),
             ("chess.lobby", "♔ 国际象棋", "打开国际象棋卡片：人机 / 群友 / 三档难度。",
              self._act_lobby_chess),
-            ("hornchess.lobby", "🐂 牛角棋", "打开牛角棋卡片：按钮走棋，点一下就是一步。",
+            ("hornchess.lobby", "🐮 牛角棋", "打开牛角棋卡片：先选执牛还是执人，再选对战方式。",
              self._act_lobby_hornchess),
 
             ("tictactoe.start_ai", "井字棋：人机对战", "由井字棋卡片触发。", self._act_start_ai),
@@ -208,6 +208,8 @@ class TicTacToePlugin(Star):
             ("chess.quit", "国际象棋结束对局", "结束当前群的国际象棋对局。",
              self._act_quit),
 
+            ("hornchess.pick_side", "牛角棋：选边", "由牛角棋入口卡片触发：先选执牛还是执人。",
+             self._act_pick_side_hornchess),
             ("hornchess.start_ai", "牛角棋：人机对战", "由牛角棋卡片触发。",
              self._act_hornchess_ai),
             ("hornchess.start_pvp", "牛角棋：群友对战", "由牛角棋卡片触发。",
@@ -316,6 +318,23 @@ class TicTacToePlugin(Star):
     async def _act_lobby_hornchess(self, context, params) -> int:
         return await self._open_lobby(context, hn.SPEC)
 
+    async def _act_pick_side_hornchess(self, context, params) -> int:
+        """入口卡片的第一步：玩家选了执牛还是执人，再给第二种卡片。"""
+        side = str(params.get("side") or "")
+        if side not in (hn.HUMANS, hn.BULL):
+            return 3
+        try:
+            await self._send_card(
+                context,
+                lobby.build_lobby_card(hn.SPEC,
+                                       self._level(context.origin, hn.SPEC), side),
+                session_id=self._ui_session(context.origin, hn.SPEC),
+            )
+        except Exception:
+            logger.exception("[HornChess] Failed to open the start card")
+            return 1
+        return 0
+
     async def _open_lobby(self, context, spec) -> int:
         """Re-send a game's entry card. Each game owns its own; neither is a
         menu of the other."""
@@ -352,10 +371,11 @@ class TicTacToePlugin(Star):
         level = str(params.get("level") or "")
         if level not in AI_LEVELS:
             return 1
+        side = str(params.get("side") or "")     # 有选边的棋种要记住玩家选的那一方
         self._levels[(context.origin, spec.key)] = level
         try:
             await self._send_card(
-                context, lobby.build_lobby_card(spec, level),
+                context, lobby.build_lobby_card(spec, level, side),
                 session_id=self._ui_session(context.origin, spec),
             )
         except Exception:
@@ -543,12 +563,14 @@ class TicTacToePlugin(Star):
     # --- horn chess (picture board, one-tap buttons) ------------------------
 
     async def _act_hornchess_ai(self, context, params) -> int:
-        return await self._start_hornchess(context, hn.MODE_AI)
+        return await self._start_hornchess(
+            context, hn.MODE_AI, str(params.get("side") or ""))
 
     async def _act_hornchess_pvp(self, context, params) -> int:
-        return await self._start_hornchess(context, hn.MODE_PVP)
+        return await self._start_hornchess(
+            context, hn.MODE_PVP, str(params.get("side") or ""))
 
-    async def _start_hornchess(self, context, mode: str) -> int:
+    async def _start_hornchess(self, context, mode: str, side: str = "") -> int:
         busy = self._matches.busy_reason(context.origin)
         if busy:
             logger.info("[HornChess] %s", busy)
@@ -571,9 +593,14 @@ class TicTacToePlugin(Star):
             except Exception:
                 logger.exception("[HornChess] Failed to explain the refusal")
             return 1
+        side = side if side in (hn.HUMANS, hn.BULL) else hn.HUMANS
         state = hn.new_state(mode, context.member_openid,
-                             self._level(context.origin, hn.SPEC))
+                             self._level(context.origin, hn.SPEC), side)
         state["display_name"] = hn.SPEC.title
+        # 人先走是这棋的规矩；玩家要是选执牛，开局就轮到 AI 的那两个人走一步，
+        # 否则卡片一发出来就是"轮到对手"，按钮一个都不给，看着像卡住了。
+        if mode == hn.MODE_AI and state["turn"] != hn.player_side(state):
+            hn.ai_move(state)
         self._matches.start(context.origin, state)
         self._avatars[context.origin] = AvatarCache()
         try:
@@ -599,9 +626,10 @@ class TicTacToePlugin(Star):
             return 3
         if state.get("phase") != hn.PHASE_WAITING:
             return 3
-        if context.member_openid == state["players"].get(hn.HUMANS, ""):
+        if context.member_openid == state["players"].get(hn.player_side(state), ""):
             return 4
-        state["players"][hn.BULL] = context.member_openid
+        other = hn.OTHER[hn.player_side(state)]
+        state["players"][other] = context.member_openid
         state["phase"] = hn.PHASE_PLAYING
         try:
             await self._send_hornchess_card(context.origin, state,
@@ -633,9 +661,10 @@ class TicTacToePlugin(Star):
             logger.info("[HornChess] Rejected %s→%s: %s",
                         hn.name_of(frm), hn.name_of(to), refusal)
             return 4
-        if not hn.is_over(state) and state["turn"] == hn.BULL:
-            # 牛由 AI 走。查表求解是 O(1) 的（局面只有几百个，开局算一次就缓存），
-            # 不需要像国际象棋那样丢进线程。
+        if (not hn.is_over(state) and state["mode"] == hn.MODE_AI
+                and state["turn"] != hn.player_side(state)):
+            # AI 那一方（可能是牛，也可能是那两个赶牛的人）。查表求解是 O(1) 的
+            # （局面只有 990 个，开局算一次就缓存），不用像国际象棋那样丢线程。
             hn.ai_move(state)
         self._matches.touch(state)
         try:

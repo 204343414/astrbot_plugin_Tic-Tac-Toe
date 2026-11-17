@@ -104,6 +104,12 @@ PIECE_MARKS = ("👨", "👩")
 PIECE_ASSETS = ("man", "woman")
 SPEC = lobby.HORNCHESS
 
+#: 可选的两方（入口卡片先问"你执哪一方"）。键必须和 HUMANS／BULL 对上，
+#: 因为它就是"开局的人执哪一方"。
+SIDES = SPEC.sides           # 单一来源：大厅卡片和这里用的是同一份声明
+SIDE_LABELS = dict(SIDES)
+OTHER = {HUMANS: BULL, BULL: HUMANS}
+
 MODE_AI = "ai"
 MODE_PVP = "pvp"
 PHASE_WAITING = "waiting"
@@ -153,9 +159,15 @@ def is_lateral(index: int, target: int) -> bool:
 
 # --- 状态 -------------------------------------------------------------------
 
-def new_state(mode: str, host_openid: str, level: str = "normal") -> dict[str, Any]:
-    players = ({HUMANS: host_openid} if mode == MODE_AI
-               else {HUMANS: host_openid, BULL: ""})
+def new_state(mode: str, host_openid: str, level: str = "normal",
+              human_side: str = HUMANS) -> dict[str, Any]:
+    """开一局。
+
+    ``human_side`` 是**发起人要执的那一方**（``HUMANS`` 赶牛的人 / ``BULL`` 牛）。
+    人机模式下另一方由 AI 走；群友模式下另一方留给加入的人。
+    """
+    human_side = human_side if human_side in (HUMANS, BULL) else HUMANS
+    players = {human_side: host_openid, OTHER[human_side]: ""}
     return {
         "game": "hornchess",
         "mode": mode,
@@ -163,6 +175,7 @@ def new_state(mode: str, host_openid: str, level: str = "normal") -> dict[str, A
         "bull": TIP,
         "humans": list(ESCAPE_POINTS),        # 两枚人子摆在底角（顺序＝槽位）
         "players": players,
+        "human_side": human_side,
         "labels": {},
         "level": lobby.normalize_level(level),
         "last_move": None,
@@ -171,6 +184,17 @@ def new_state(mode: str, host_openid: str, level: str = "normal") -> dict[str, A
         "session_id": "",
         "phase": PHASE_WAITING if mode == MODE_PVP else PHASE_PLAYING,
     }
+
+
+def player_side(state: dict[str, Any]) -> str:
+    """发起人执哪一方。老状态里没有这个字段时按"人"算。"""
+    side = state.get("human_side")
+    return side if side in (HUMANS, BULL) else HUMANS
+
+
+def seat_of(state: dict[str, Any], side: str) -> str:
+    """这一方是谁（openid，空字符串表示 AI 或空座）。"""
+    return str((state.get("players") or {}).get(side) or "")
 
 
 def _occupied(state: dict[str, Any]) -> set[int]:
@@ -205,10 +229,15 @@ def apply_move(state: dict[str, Any], frm: int, to: int,
     if is_over(state):
         return "对局已结束"
     side = state["turn"]
-    if side == BULL and actor_openid:
-        owner = str((state.get("players") or {}).get(BULL) or "")
-        if owner and actor_openid != owner:
-            return "现在轮到牛走，这步不是你走的"
+    if actor_openid:
+        if state.get("mode") == MODE_AI:
+            # 人机模式：玩家只能动自己那一方，另一方的按钮本来就不该出现。
+            if side != player_side(state):
+                return "轮到对手走，这步不是你走的"
+        else:
+            owner = str((state.get("players") or {}).get(side) or "")
+            if owner and actor_openid != owner:
+                return "轮到对手走，这步不是你走的"
     matches = [m for m in legal_moves(state) if m[1] == frm and m[2] == to]
     if not matches:
         if side == HUMANS and DEPTH[to] > DEPTH[frm]:
@@ -265,15 +294,19 @@ def status_text(state: dict[str, Any]) -> str:
             return f"{MARKS[BULL]} 赶牛的人动不了了，牛方获胜！"
         return f"{MARKS[BULL]} 步数用完牛还没被围住，牛方获胜！"
     if outcome == HUMANS:
-        return "🎉 牛被憋死在牛角尖上，赶牛的人获胜！"
+        return f"🎉 {MARKS[HUMANS]} 把牛憋死在牛角尖上，赶牛的人获胜！"
+
     turn = state["turn"]
     tail = f"（还剩 {plies_left(state)} 手）"
     if state["mode"] == MODE_AI:
-        base = ("轮到你赶牛 👨‍👩" if turn == HUMANS
-                else f"{MARKS[BULL]} 牛在找出路…")
-    else:
-        base = f"轮到 {MARKS[turn]} {'赶牛' if turn == HUMANS else '牛'} 走棋"
-    return base + tail
+        mine = player_side(state)
+        if turn == mine:
+            base = (f"轮到你走棋 {MARKS[mine]}"
+                    + ("：把牛往前赶" if mine == HUMANS else "：找路跑出去"))
+        else:
+            base = f"{MARKS[OTHER[mine]]} 对手在想…"
+        return base + tail
+    return f"轮到 {MARKS[turn]} {'赶牛' if turn == HUMANS else '牛'} 走棋" + tail
 
 
 def player_label(state: dict[str, Any], side: str) -> str:
@@ -380,7 +413,11 @@ LEVEL_BLUNDER = {"easy": 0.45, "normal": 0.22, "hard": 0.08}
 
 
 def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, int]:
-    """走完这步之后，从"牛"的角度看有多好：先比胜负，再比谁能拖更久。"""
+    """走完这步之后，从**走这步的那一方**看有多好。
+
+    先比胜负（2 赢 / 1 和 / 0 输），再比"几步见分晓"：能赢就往快里走（步数小
+    优先），要输就往慢里拖（步数大优先）——牛靠拖延也能赢，人也一样想快点了结。
+    """
     side, frm, to = move
     if side == BULL:
         key = (to, tuple(sorted(state["humans"])), HUMANS)
@@ -389,15 +426,18 @@ def _score_for(state: dict[str, Any], move: tuple[str, int, int]) -> tuple[int, 
         humans[humans.index(frm)] = to
         key = (state["bull"], tuple(sorted(humans)), BULL)
     winner, depth = _solve().get(key, (BULL, PLY_LIMIT))
-    rank = 2 if winner == BULL else 0
-    # 牛要拖：同分时步数越大越好（对牛来说"越晚见分晓"越有利）。
+    rank = 2 if winner == side else 0
     return rank, depth
 
 
 def ai_move(state: dict[str, Any], rng: random.Random | None = None) -> tuple[int, int] | None:
-    """牛走一步，返回 ``(从, 到)``；``None`` 表示没得走。"""
+    """替**当前该走的那一方**走一步，返回 ``(从, 到)``；``None`` 表示没得走。
+
+    两边都会走：玩家选「🐮 选牛」时 AI 就是那两个赶牛的人，反之亦然。
+    """
     rng = rng or random.Random()
-    moves = [m for m in legal_moves(state) if m[0] == BULL]
+    turn = state["turn"]
+    moves = [m for m in legal_moves(state) if m[0] == turn]
     if not moves:
         return None
     if len(moves) == 1:
@@ -425,13 +465,16 @@ def ai_move(state: dict[str, Any], rng: random.Random | None = None) -> tuple[in
 
 # --- 卡片 -------------------------------------------------------------------
 
-def build_lobby_card(level: str = "normal") -> dict[str, Any]:
-    return lobby.build_lobby_card(SPEC, level)
+def build_lobby_card(level: str = "normal", side: str = "") -> dict[str, Any]:
+    return lobby.build_lobby_card(SPEC, level, side)
 
 
 def build_waiting_card(state: dict[str, Any], host_label: str = "") -> dict[str, Any]:
-    host_openid = str((state.get("players") or {}).get(HUMANS) or "")
-    return lobby.build_waiting_card(SPEC, host_label, host_openid)
+    mine = player_side(state)
+    return lobby.build_waiting_card(
+        SPEC, host_label, seat_of(state, mine),
+        host_mark=MARKS[mine], guest_mark=MARKS[OTHER[mine]],
+    )
 
 
 #: 卡片里声明的图片尺寸（渲染器保证一致）。
@@ -481,11 +524,14 @@ def build_board_card(state: dict[str, Any], image_url: str = "") -> dict[str, An
         lines.append(
             f"![棋盘 #{CARD_IMAGE_WIDTH}px #{CARD_IMAGE_HEIGHT}px]({image_url})")
     if not is_over(state):
-        if state["mode"] == MODE_AI and state["turn"] == BULL:
-            lines.append("牛正在找路…")
+        if state["mode"] == MODE_AI and state["turn"] != player_side(state):
+            lines.append(f"{MARKS[state['turn']]} 对手正在想…")
+        elif state["turn"] == BULL:
+            lines.append(f"{MARKS[BULL]} 轮到你：牛前后左右都能走，冲到底角就赢，"
+                         "步数用完还没被围住也算你赢。")
         else:
-            lines.append("人只能往尖上赶、不能后退，同一横杆上可以左右挪；"
-                         "牛前后左右都行，冲到底角就跑了。")
+            lines.append(f"{MARKS[HUMANS]} 轮到你：只能往尖上赶、不能后退，"
+                         "同一条横杆上可以左右挪；把牛堵死就赢。")
     return {
         "id": "hornchess_board",
         "markdown": "\n".join(lines),

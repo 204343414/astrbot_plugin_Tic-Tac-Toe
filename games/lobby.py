@@ -13,6 +13,13 @@ well:
     [🤖 人机对战] [👥 群友对战]
     [轻松] [普通] [困难]
 
+A game whose two sides play differently (牛角棋: one bull vs. two farmers) also
+declares ``sides``. Then the entry card becomes a two-button question —
+「选牛」/「选人」— and the five-button card above only appears once a side is
+picked, carried in the button ``params`` so no server-side state is needed:
+
+    /牛角棋 → [🐮 选牛] [👨‍👩 选人] → [🤖 人机] [👥 群友] / [难度] / [↩ 返回]
+
 QQ allows at most 5 rows x 5 columns, so this leaves plenty of headroom; the
 point of the constraint is consistency, not capacity. A new game only has to
 declare a :class:`GameSpec` and implement the four action ids derived from its
@@ -50,6 +57,11 @@ class GameSpec:
     host_mark: str
     #: Mark the joining player takes (❌ / ⚪).
     guest_mark: str
+    #: Optional ``((key, label), ...)`` for games whose two sides are not
+    #: symmetric. When set, the entry card asks which side the player wants
+    #: before offering 人机／群友. ``key`` must match what the game module
+    #: understands (see ``hornchess.SIDES``).
+    sides: tuple[tuple[str, str], ...] = ()
 
 
 def action_id(spec: GameSpec, name: str) -> str:
@@ -60,34 +72,79 @@ def normalize_level(level: object) -> str:
     return level if level in AI_LEVELS else LEVEL_NORMAL
 
 
-def build_lobby_card(spec: GameSpec, level: str = LEVEL_NORMAL) -> dict[str, Any]:
-    """The five-button entry card. Open to everyone: anyone may start a game."""
+def build_side_card(spec: GameSpec, level: str = LEVEL_NORMAL) -> dict[str, Any]:
+    """Step one for asymmetric games: 你要哪一方？"""
     level = normalize_level(level)
     return {
-        "id": f"{spec.key}_lobby",
+        "id": f"{spec.key}_sides",
         "markdown": "\n".join([
-            f"# {spec.title}",
+            f"# {spec.title} · 选边",
             f"AI 难度：**{LEVEL_LABELS[level]}**",
             "",
             spec.how_to,
+            "",
+            "**先选你要执哪一方**，再选人机还是群友。",
         ]),
+        "rows": [[
+            {"id": f"side_{key}", "label": label, "style": 1,
+             "action_id": action_id(spec, "pick_side"),
+             "params": {"side": key, "level": level}}
+            for key, label in spec.sides
+        ]],
+        "one_shot": False,
+        "ttl_seconds": 3600,
+    }
+
+
+def build_lobby_card(spec: GameSpec, level: str = LEVEL_NORMAL,
+                     side: str = "") -> dict[str, Any]:
+    """The entry card.
+
+    For a game that declares ``sides`` this is two steps: with no ``side`` it
+    shows the 选边 question, with a ``side`` it shows the usual five buttons
+    (and remembers the side in every button's params).
+    """
+    level = normalize_level(level)
+    if spec.sides and side not in [key for key, _ in spec.sides]:
+        return build_side_card(spec, level)
+
+    chosen = ""
+    if spec.sides:
+        chosen = side
+    labels = dict(spec.sides)
+    side_line = f"你执：**{labels[chosen]}**　（点「↩ 重新选边」换边）" if chosen else ""
+    return {
+        "id": f"{spec.key}_lobby",
+        "markdown": "\n".join(
+            [line for line in [
+                f"# {spec.title}",
+                f"AI 难度：**{LEVEL_LABELS[level]}**",
+                side_line,
+                "",
+                spec.how_to,
+            ] if line != ""]
+        ),
         "rows": [
             [
                 {"id": "start_ai", "label": "🤖 人机对战", "style": 1,
                  "action_id": action_id(spec, "start_ai"),
-                 "params": {"level": level}},
+                 "params": {"level": level, "side": chosen}},
                 {"id": "start_pvp", "label": "👥 群友对战", "style": 1,
-                 "action_id": action_id(spec, "start_pvp"), "params": {}},
+                 "action_id": action_id(spec, "start_pvp"),
+                 "params": {"side": chosen}},
             ],
             [
                 {"id": f"level_{name}",
                  "label": f"{'✅ ' if name == level else ''}{LEVEL_LABELS[name]}",
                  "style": 0,
                  "action_id": action_id(spec, "set_level"),
-                 "params": {"level": name}}
+                 "params": {"level": name, "side": chosen}}
                 for name in AI_LEVELS
             ],
-        ],
+        ] + ([[
+            {"id": "back", "label": "↩ 重新选边", "style": 0,
+             "action_id": action_id(spec, "lobby"), "params": {}},
+        ]] if chosen else []),
         # Not one_shot: the difficulty buttons are meant to be pressed more
         # than once, and the Hub burns a one-shot button before the game runs.
         "one_shot": False,
@@ -96,16 +153,18 @@ def build_lobby_card(spec: GameSpec, level: str = LEVEL_NORMAL) -> dict[str, Any
 
 
 def build_waiting_card(spec: GameSpec, host_label: str = "",
-                       host_openid: str = "") -> dict[str, Any]:
+                       host_openid: str = "", host_mark: str = "",
+                       guest_mark: str = "") -> dict[str, Any]:
     """Shown after 「群友对战」: one seat taken, waiting for an opponent."""
     host = host_label or "发起者"
+    seat, other = host_mark or spec.host_mark, guest_mark or spec.guest_mark
     return {
         "id": f"{spec.key}_waiting",
         "markdown": "\n".join([
             f"# {spec.title} · 等待对手",
-            f"{spec.host_mark} {host} 已入座，等待一位群友加入…",
+            f"{seat} {host} 已入座，等待一位群友加入…",
             "",
-            f"点击「加入对战」成为 {spec.guest_mark} 方。",
+            f"点击「加入对战」成为 {other} 方。",
         ]),
         "rows": [[
             # NOT one_shot: the Hub consumes a one-shot click *before* the game
@@ -163,9 +222,11 @@ CHESS = GameSpec(
 HORNCHESS = GameSpec(
     key="hornchess",
     title="牛角棋",
-    how_to=("**点按钮走棋**：牛（🐂）前后左右都行，赶牛的人（🧑‍🌾）只能往尖上赶、"
+    how_to=("**点按钮走棋**：牛（🐮）前后左右都行，赶牛的人（👨‍👩）只能往尖上赶、"
             "不能后退（同一条横杆可左右挪）。把牛逼到牛角尖无路可走就赢；"
             "牛冲到底角、或步数用完还没围住，则牛赢。"),
-    host_mark="🧑‍🌾",
-    guest_mark="🐂",
+    # 牛角棋两边不对称（1 头牛 vs 2 个人），所以入口先问"你要执哪一方"。
+    host_mark="👨‍👩",
+    guest_mark="🐮",
+    sides=(("b", "🐮 选牛"), ("h", "👨‍👩 选人")),
 )
