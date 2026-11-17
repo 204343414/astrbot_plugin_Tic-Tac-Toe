@@ -485,8 +485,13 @@ CARD_IMAGE_HEIGHT = 720
 def _move_buttons(state: dict[str, Any]) -> list[list[dict[str, Any]]]:
     """把合法走法直接做成按钮：**一次点击就是一步棋**。
 
-    11 个点、每方最多 4 种走法，全部塞得下（QQ 键盘一行 5 个按钮也够）。
-    横走和前进在按钮上用不同名字（点名）区分，玩家一看就能对上图。
+    按钮文字只写**目标点**，比如 ``C2``／``👨C2``：QQ 的键盘一行横着摆五个键，
+    写成"F1→E1"这种长文字会被挤掉甚至截断，而棋盘图上每个点都标了名字，
+    看一眼就知道该点哪个。
+
+    * 牛只有一头，所以按钮就是点名：``C2``。
+    * 两个人各占一行，前面带自己的图标：``👨C2``／``👩C2``。这不只是好看——
+      两个人有可能走到**同一个点**（一共 136 种局面会这样），图标正好把两步分开。
     """
     moves = legal_moves(state)
     rows: list[list[dict[str, Any]]] = []
@@ -501,18 +506,18 @@ def _move_buttons(state: dict[str, Any]) -> list[list[dict[str, Any]]]:
         }
 
     if state["turn"] == BULL:
-        rows.append([button(f"{MARKS[BULL]} {name_of(frm)}→{name_of(to)}", frm, to)
+        rows.append([button(name_of(to), frm, to)
                      for _, frm, to in moves])
     else:
         for slot, piece in enumerate(state["humans"]):
             mark = PIECE_MARKS[slot % len(PIECE_MARKS)]
-            mine = [button(f"{mark} {name_of(frm)}→{name_of(to)}", frm, to)
+            mine = [button(f"{mark}{name_of(to)}", frm, to)
                     for _, frm, to in moves if frm == piece]
             if mine:
                 rows.append(mine)
 
     rows.append([
-        {"id": "quit", "label": "🔚 结束对局", "style": 0,
+        {"id": "quit", "label": "🔚 结束", "style": 0,
          "action_id": lobby.action_id(SPEC, "quit"), "params": {}},
     ])
     return rows
@@ -527,11 +532,11 @@ def build_board_card(state: dict[str, Any], image_url: str = "") -> dict[str, An
         if state["mode"] == MODE_AI and state["turn"] != player_side(state):
             lines.append(f"{MARKS[state['turn']]} 对手正在想…")
         elif state["turn"] == BULL:
-            lines.append(f"{MARKS[BULL]} 轮到你：牛前后左右都能走，冲到底角就赢，"
-                         "步数用完还没被围住也算你赢。")
+            lines.append(f"{MARKS[BULL]} 轮到你：按钮上就是落点（点 C2 就走 C2）。"
+                         "牛前后左右都能走，冲到底角就赢，步数用完还没被围住也算你赢。")
         else:
-            lines.append(f"{MARKS[HUMANS]} 轮到你：只能往尖上赶、不能后退，"
-                         "同一条横杆上可以左右挪；把牛堵死就赢。")
+            lines.append(f"{MARKS[HUMANS]} 轮到你：按钮是「谁→去哪」，比如 👨C2 = "
+                         "左边那位走到 C2。人只能往尖上赶、不能后退，同杆可左右挪。")
     return {
         "id": "hornchess_board",
         "markdown": "\n".join(lines),

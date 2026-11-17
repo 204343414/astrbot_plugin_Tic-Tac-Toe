@@ -351,6 +351,45 @@ def test_farmer_buttons_cover_every_legal_move_once():
     assert len(set(moves)) == len(moves)
 
 
+def test_the_bull_buttons_are_just_the_destination():
+    """牛只有一个，按钮就是点名（C2），不带"从哪儿到哪儿"。"""
+    state = setup("A1", ("F1", "F2"), hc.BULL)
+    rows = hc._move_buttons(state)
+    labels = [b["label"] for b in rows[0]]
+    assert labels == [hc.name_of(t) for _, _, t in hc.legal_moves(state)]
+    assert all("→" not in label for label in labels)
+
+
+def test_the_farmer_buttons_are_the_emoji_plus_the_destination():
+    """人的按钮是 👨C2 / 👩C2 这种十几个字符以内的小键。"""
+    state = fresh()
+    rows = hc._move_buttons(state)
+    buttons = [b for row in rows[:-1] for b in row]
+    for button in buttons:
+        assert "→" not in button["label"]
+        assert len(button["label"]) <= 4          # emoji + 两个字符的点名
+    # 两个人各占一行，图标和各自的槽位对得上
+    for slot, row in enumerate(rows[:-1]):
+        mark = hc.PIECE_MARKS[slot]
+        for button in row:
+            assert button["label"].startswith(mark)
+            assert button["params"]["frm"] == state["humans"][slot]
+
+
+def test_two_farmers_reaching_the_same_point_still_get_different_buttons():
+    """136 种局面里两枚子能走到同一个点，图标必须把这两步分开。"""
+    state = setup("A1", ("C1", "D1"), hc.HUMANS
+                  )
+    targets = {}
+    for _, _, to in hc.legal_moves(state):
+        targets[to] = targets.get(to, 0) + 1
+    shared = [to for to, count in targets.items() if count > 1]
+    assert shared, "这个局面本来是用来复现重名的"
+    buttons = [b for row in hc._move_buttons(state)[:-1] for b in row]
+    labels = [b["label"] for b in buttons]
+    assert len(labels) == len(set(labels)) == len(buttons)
+
+
 def test_buttons_never_exceed_five_per_row():
     """QQ 键盘一行最多 5 个按钮。"""
     for bull, humans in itertools.product(range(len(hc.NAMES)),
@@ -362,10 +401,11 @@ def test_buttons_never_exceed_five_per_row():
             assert len(row) <= 5
 
 
-def test_the_quit_button_is_always_last():
+def test_the_quit_button_is_always_last_and_short():
     state = fresh()
     rows = hc._move_buttons(state)
     assert rows[-1][0]["id"] == "quit"
+    assert len(rows[-1][0]["label"]) <= 6          # 「🔚 结束」，别把键盘挤宽
 
 
 def test_board_card_declares_the_same_size_as_the_renderer():

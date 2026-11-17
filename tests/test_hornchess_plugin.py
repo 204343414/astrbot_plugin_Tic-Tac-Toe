@@ -224,7 +224,9 @@ def test_choosing_the_bull_makes_the_ai_open_as_the_farmers():
     assert state["players"][hc.HUMANS] == ""        # 对面是 AI
     card = plug._hub.cards[-1]
     labels = [b["label"] for row in card["rows"] for b in row]
-    assert any(label.startswith("🐮") for label in labels)
+    # 执牛时走法按钮就是落点本身（B1／B2），不认识「→」这种长写法
+    assert {"B1", "B2"} <= set(labels)
+    assert all("→" not in label for label in labels)
 
 
 def test_the_ai_can_play_the_farmers():
