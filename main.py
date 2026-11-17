@@ -17,6 +17,7 @@ Design constraints that shaped it (see the Hub's docs/EPHEMERAL_CARDS.md):
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import random
 import time
@@ -121,6 +122,11 @@ class TicTacToePlugin(Star):
             return None
         self._hub = hub
         return hub
+
+    #: 每个群保留几张棋盘素材。QQ 素材库每个机器人只有 100 张，而斗兽棋每走
+    #: 一步都换一张图 —— 不回收的话四五盘棋就把额度吃光。留 2 张是因为翻回去
+    #: 看上一手仍然常见；更早的卡片本来也会被 Hub 撤回。
+    MATERIAL_KEEP = 2
 
     @staticmethod
     def _hub_module(hub: Any, name: str):
@@ -518,8 +524,9 @@ class TicTacToePlugin(Star):
                         "# 斗兽棋暂时开不了",
                         f"**{reason}**",
                         "",
-                        "斗兽棋的棋盘是一张带按钮的卡片，需要 Hub 图床把图片"
-                        "发布到公网，所以图床不通就没法开局。",
+                        "斗兽棋的棋盘是一张带按钮的卡片，图片要有地方安放才能"
+                        "开局。把 Hub 升级到 0.24 就可以直接存进 QQ 素材库，"
+                        "不再需要公网图床。",
                         "管理员可发送 `/诊断` 查看图床状态。",
                     ]),
                     "rows": [],
@@ -814,14 +821,23 @@ class TicTacToePlugin(Star):
             await self._recall_quietly(origin, previous_id, previous_at, client)
 
     async def _image_host_or_reason(self) -> str:
+        """Why a picture card cannot be drawn right now, or "" when it can.
+
+        The material route (Hub >= 0.24) needs no public address at all, so its
+        presence alone settles the question: nothing to tunnel, nothing to
+        reach, nothing to go stale. Only when it is missing do we fall back to
+        asking the image host whether it is reachable.
+        """
         hub = self._get_hub(quiet=True)
         if hub is None:
             return "QQ Official Hub 未安装或未启用"
+        if hasattr(hub, "publish_image_material"):
+            return ""
         checker = getattr(hub, "image_host_reachable", None)
         if checker is not None:
             try:
                 if not await checker():
-                    return "图床未就绪；请确认 Hub 图床及公网隧道正常"
+                    return "图床未就绪；请升级 Hub 到 0.24（用素材库发包，不需要公网地址）"
             except Exception as exc:
                 return f"图床检查失败：{exc}"
         return ""
@@ -837,22 +853,134 @@ class TicTacToePlugin(Star):
             raise RuntimeError("QQ Official Hub 不可用")
         await self._refresh_labels_from_origin(origin, state)
 
-        # 渲染卡片专用轻量棋盘图并发布至图床
         image = ar.render_board(state, banner=False)
-        url = await hub.publish_image_checked(image, slot=f"animalchess:{origin}")
-
-        card = ach.build_board_card(state, url)
-        passive_event_id = self._hub_module(hub, "passive_reply").passive_event_id
-        await hub.send_ephemeral_card(
-            origin, card,
-            client=client,
-            session_id=self._ui_session(origin, ach.SPEC),
-            event_id=passive_event_id(interaction) if interaction is not None else None,
-            msg_id=msg_id,
-            initiator_openid="",
-            clicker_header="",
+        event_id = (
+            self._hub_module(hub, "passive_reply").passive_event_id(interaction)
+            if interaction is not None else None
         )
+
+        # Two ways to get a picture into a card, tried in order of how little
+        # they depend on the outside world:
+        #
+        #   1. QQ 素材库 —— 字节直接进腾讯的存储，卡片里写 qqbot-media 引用。
+        #      不需要公网地址、不需要隧道、不需要 DNS。之前那种"卡片裂图"
+        #      根本不会发生，因为腾讯不需要来我们这边抓任何东西。
+        #   2. Hub 图床 —— 老路子，公网 URL。留作兜底：老版本 Hub 没有素材接口。
+        candidates: list[tuple[str, str]] = []       # (图片地址, 素材 id)
+        upload = getattr(hub, "publish_image_material", None)
+        if upload is not None:
+            try:
+                material = await upload(image, client=client, origin=origin)
+                if material.get("url"):
+                    candidates.append((str(material["url"]),
+                                       str(material.get("image_id") or "")))
+            except Exception as exc:
+                logger.warning("[AnimalChess] 素材上传失败，回退图床：%s", exc)
+        try:
+            host_url = await hub.publish_image_checked(
+                image, slot=f"animalchess:{origin}")
+            if host_url:
+                candidates.append((str(host_url), ""))
+        except Exception as exc:
+            logger.warning("[AnimalChess] 图床发布失败：%s", exc)
+        if not candidates:
+            raise RuntimeError("棋盘图片无处安放：素材库和图床都不可用")
+
+        # 带图发送，并让 QQ 校验转存结果（verify_image）。不校验时，图片在
+        # 平台内部转存失败的消息照样 200 发出，群里只剩一张裂图 —— 这正是
+        # 之前查了很久的那个"根本读不到"。
+        session_id = self._ui_session(origin, ach.SPEC)
+        delivered = False
+        material_id = ""
+        last_error: Exception | None = None
+        for url, candidate_material in candidates:
+            try:
+                await self._send_card_image(
+                    origin, ach.build_board_card(state, url), hub,
+                    client=client, session_id=session_id,
+                    event_id=event_id, msg_id=msg_id,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning("[AnimalChess] 带图卡片被拒（%s）：%s",
+                               url.split("?")[0], exc)
+                if candidate_material:
+                    await self._release_material(hub, candidate_material,
+                                                 client=client, origin=origin)
+                continue
+            delivered = True
+            material_id = candidate_material
+            break
+
+        if not delivered:
+            # 最后一条路：这张图在卡片里就是过不去。退回"无图卡片 + 独立图片
+            # 消息" —— 按钮照旧能点，棋盘只是换到另一条消息上。宁可难看，
+            # 也不要让玩家对着裂图猜。
+            logger.warning("[AnimalChess] 带图卡片全部失败，回退无图卡片：%s",
+                           last_error)
+            await hub.send_ephemeral_card(
+                origin, ach.build_board_card(state, ""),
+                client=client, session_id=session_id,
+                event_id=event_id, msg_id=msg_id,
+                initiator_openid="", clicker_header="",
+            )
+            await hub.send_image_message(
+                origin, image, client=client,
+                event_id=event_id, msg_id=msg_id,
+            )
+
+        if material_id:
+            await self._remember_material(hub, material_id,
+                                          client=client, origin=origin)
         self._matches.touch(state)
+
+    async def _send_card_image(self, origin: str, card: dict[str, Any], hub,
+                               *, client=None, session_id: str = "",
+                               event_id: str | None = None,
+                               msg_id: str | None = None) -> None:
+        """Send a card whose picture must survive, or raise.
+
+        ``verify_image`` is opt-in on the Hub side because it can turn a
+        delivered-but-broken message into a refused one. For a board that is
+        exactly the trade we want -- but an older Hub has no such parameter, so
+        it is detected by signature rather than by catching TypeError (which
+        would also swallow a real failure from inside the call).
+        """
+        kwargs: dict[str, Any] = {
+            "client": client, "session_id": session_id,
+            "event_id": event_id, "msg_id": msg_id,
+            "initiator_openid": "", "clicker_header": "",
+        }
+        if "verify_image" in inspect.signature(hub.send_ephemeral_card).parameters:
+            kwargs["verify_image"] = True
+        await hub.send_ephemeral_card(origin, card, **kwargs)
+
+    async def _remember_material(self, hub, material_id: str, *,
+                                 client=None, origin: str = "") -> None:
+        """Track this group's material images and release the ones that fell out.
+
+        QQ caps materials at 100 per bot. A board redraws every move, so without
+        this the bot hits the cap mid-game and *then* every card fails -- a
+        failure that looks nothing like its cause.
+        """
+        book = getattr(self, "_materials", None)
+        if book is None:
+            book = self._materials = {}
+        bucket = book.setdefault(origin, [])
+        bucket.append((time.time(), material_id))
+        while len(bucket) > self.MATERIAL_KEEP:
+            _, stale = bucket.pop(0)
+            await self._release_material(hub, stale, client=client, origin=origin)
+
+    async def _release_material(self, hub, material_id: str, *,
+                                client=None, origin: str = "") -> None:
+        cleaner = getattr(hub, "delete_image_material", None)
+        if cleaner is None or not material_id:
+            return
+        try:
+            await cleaner(material_id, client=client, origin=origin)
+        except Exception:
+            logger.debug("[AnimalChess] 回收素材失败 %s", material_id)
 
     async def _refresh_labels_from_origin(self, origin: str,
                                           state: dict[str, Any]) -> None:
