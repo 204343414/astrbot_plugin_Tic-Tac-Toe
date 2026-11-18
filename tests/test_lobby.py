@@ -20,18 +20,24 @@ ALL_SPECS = (ttt.SPEC, gk.SPEC)
 
 
 @pytest.mark.parametrize("spec", ALL_SPECS, ids=lambda s: s.key)
-def test_lobby_is_exactly_five_buttons(spec):
-    """Two modes on top, three difficulties below -- nothing else."""
+def test_lobby_is_exactly_five_buttons_plus_optional_rules(spec):
+    """Two modes on top, three difficulties below -- plus a 规则 row when the
+    game has rules to show. 规则 deliberately sits on its own row: mixed into
+    the difficulty row it would read as a fourth difficulty."""
     rows = lobby.build_lobby_card(spec)["rows"]
-    assert [len(row) for row in rows] == [2, 3]
-    assert sum(len(row) for row in rows) == 5
+    expected = [2, 3] + ([1] if spec.rules else [])
+    assert [len(row) for row in rows] == expected
+    assert len(rows) <= 5, "QQ 单张卡片最多 5 行"
+    if spec.rules:
+        assert [b["label"] for b in rows[-1]] == ["📖 规则"]
 
 
 @pytest.mark.parametrize("spec", ALL_SPECS, ids=lambda s: s.key)
 def test_lobby_labels_are_identical_across_games(spec):
     """The buttons say the same thing everywhere; only the title differs."""
     labels = [b["label"] for row in lobby.build_lobby_card(spec)["rows"] for b in row]
-    assert labels == ["🤖 人机对战", "👥 群友对战", "轻松", "✅ 普通", "困难"]
+    assert labels[:5] == ["🤖 人机对战", "👥 群友对战", "轻松", "✅ 普通", "困难"]
+    assert labels[5:] == (["📖 规则"] if spec.rules else [])
 
 
 @pytest.mark.parametrize("spec", ALL_SPECS, ids=lambda s: s.key)
@@ -131,7 +137,12 @@ def test_every_lobby_action_is_registered_by_the_plugin():
         waiting = lobby.build_waiting_card(spec, "小明", "U1")
         for row in card["rows"] + waiting["rows"]:
             for button in row:
-                assert f'"{button["action_id"]}"' in source, (
+                literal = f'"{button["action_id"]}"'
+                # 规则按钮是按 GameSpec 循环注册的，源码里出现的是
+                # f"{spec.key}.rules" 这种模板，不会逐字写死五个游戏。
+                dynamic = (f'f"{{spec.key}}.{button["action_id"].split(".", 1)[1]}"'
+                           in source)
+                assert literal in source or dynamic, (
                     f"{button['action_id']} 出现在卡片上却没有注册"
                 )
         assert f'"{spec.key}.lobby"' in source

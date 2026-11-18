@@ -26,6 +26,11 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+
+try:                              # 老版本 AstrBot 可能没有导出 MessageChain
+    from astrbot.api.event import MessageChain
+except ImportError:               # pragma: no cover
+    MessageChain = None           # type: ignore[assignment]
 from astrbot.api.star import Context, Star, register
 
 from .games import animalchess as ach
@@ -55,11 +60,19 @@ HUB_NAME = "astrbot_plugin_qqofficial_hub"
 OWNER = PLUGIN_NAME
 
 
+#: 轮到某一方却迟迟不走棋，多久算挂机（秒）。所有双人博弈统一用这一个值。
+DEFAULT_MOVE_TIMEOUT = 180
+
+#: 所有棋种的规格表。规则按钮、超时文案、以及以后的新玩法都从这里取，
+#: 避免"新增一个游戏忘了在某处补一行"。
+GAME_SPECS = (ttt.SPEC, gk.SPEC, ach.SPEC, ch.SPEC, hn.SPEC)
+
+
 @register(
     PLUGIN_NAME,
     "204343414",
-    "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋，支持群友对战与 AI 对战。",
-    "0.8.2",
+    "QQ 官方机器人棋类小游戏：井字棋、五子棋、斗兽棋、国际象棋、牛角棋，支持群友对战与 AI 对战。",
+    "0.11.0",
     "https://github.com/204343414/astrbot_plugin_Tic-Tac-Toe",
 )
 class TicTacToePlugin(Star):
@@ -75,14 +88,32 @@ class TicTacToePlugin(Star):
         # Gomoku boards are pictures, so they need their own registry: one
         # match per group, an idle deadline, and avatars cached per match.
         self.idle_timeout = int((self.config or {}).get("idle_timeout_seconds", 90))
+        #: 轮到某一方却迟迟不走棋，超过这么多秒就自动判他认输。
+        #: 这个和 idle_timeout 是两件事：idle 是"整局没人管了就把座位清空"，
+        #: 这个是"一方挂机了，直接判负，让对手不用干等"。
+        #: 0 = 关掉自动认输（只保留清座位）。
+        self.move_timeout = int(
+            (self.config or {}).get("move_timeout_seconds", DEFAULT_MOVE_TIMEOUT)
+        )
+        # 座位清理必须晚于判负，否则一局挂机到 90 秒就被静悄悄清掉，
+        # 玩家永远等不到那句"判认输"。留 60 秒余量让播报先发出去。
+        if self.move_timeout:
+            # 只有本来就没配 idle（旧配置）时才自动放宽，避免覆盖用户手写的值。
+            if "idle_timeout_seconds" not in (self.config or {}):
+                self.idle_timeout = max(self.idle_timeout, self.move_timeout + 60)
         self._matches = MatchRegistry(self.idle_timeout)
+        #: 后台巡检任务：没有它，超时只能等到下一次有人说话才被发现，
+        #: 而挂机场景恰恰就是"没有人说话"。
+        self._timeout_task: asyncio.Task | None = None
         self._avatars: dict[str, AvatarCache] = {}
         self._hub = None
 
     async def initialize(self) -> None:
         self._register_actions()
+        self._start_timeout_watchdog()
 
     async def terminate(self) -> None:
+        await self._stop_timeout_watchdog()
         self._matches.clear()
         self._avatars.clear()
         hub = self._get_hub(quiet=True)
@@ -91,6 +122,123 @@ class TicTacToePlugin(Star):
                 hub.actions.unregister_owner(OWNER)
             except Exception:
                 logger.warning("[TicTacToe] Failed to unregister actions")
+
+    # --- 走棋超时（挂机判负）------------------------------------------------
+    #
+    # 为什么要有后台任务：以前一轮"清座位"是懒扫描，只有在**下一条消息进来**
+    # 时才检查。可挂机的场景正好是没人说话，于是那局会一直躺在那里，对手只能
+    # 自己发一句 /认输。改成定时巡检之后，180 秒到点就自己判负并推一条消息。
+    #
+    # 为什么判"超时方认输"而不是"判和"：用户明确要求认输。判和会让挂机变成
+    # 一种便宜的求和手段；认输才让"轮到你就得走"成为硬规则。
+
+    TIMEOUT_SWEEP_SECONDS = 15
+
+    def _start_timeout_watchdog(self) -> None:
+        if not self.move_timeout or self._timeout_task is not None:
+            return
+        try:
+            self._timeout_task = asyncio.create_task(self._timeout_watchdog())
+        except RuntimeError:          # 没有事件循环（单测里常见），静默跳过
+            self._timeout_task = None
+
+    async def _stop_timeout_watchdog(self) -> None:
+        task = self._timeout_task
+        self._timeout_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _timeout_watchdog(self) -> None:
+        """每 15 秒看一遍所有对局，把挂机的那一方判负。"""
+        while True:
+            try:
+                await asyncio.sleep(self.TIMEOUT_SWEEP_SECONDS)
+                await self._sweep_move_timeouts()
+            except asyncio.CancelledError:
+                raise
+            except Exception:         # 巡检自己不能把插件带崩
+                logger.exception("[Games] 超时巡检出错")
+
+    async def _sweep_move_timeouts(self, now: float | None = None) -> list[str]:
+        """对所有对局做一次超时检查，返回被判负的 origin 列表。
+
+        独立成一个方法（而不是写进循环里）是为了能在测试里直接调、并且
+        传入伪造的 ``now``，不用真的等 180 秒。
+        """
+        if not self.move_timeout:
+            return []
+        now = time.time() if now is None else now
+        fired: list[str] = []
+        for origin in list(self._matches._matches.keys()):
+            # 直接读注册表而不是 get()：get() 会顺手把"idle 过期"的对局删掉，
+            # 那样判负就永远轮不到它，玩家只会看到对局凭空消失。
+            state = self._matches._matches.get(origin)
+            if state is None:
+                continue
+            if not self._match_is_live(state):
+                continue
+            moved = float(state.get("touched_at") or 0)
+            if now - moved <= self.move_timeout:
+                continue
+            if await self._forfeit_on_timeout(origin, state):
+                fired.append(origin)
+        return fired
+
+    @staticmethod
+    def _match_is_live(state: dict[str, Any]) -> bool:
+        """只有"真在下"的对局才计时。等待对手、已分胜负的都不算。"""
+        if state.get("winner"):
+            return False
+        if str(state.get("phase") or "") == "waiting":
+            return False
+        return True
+
+    async def _forfeit_on_timeout(self, origin: str, state: dict[str, Any]) -> bool:
+        """把轮到的那一方判负，并推一条消息到群里。"""
+        spec = next((sp for sp in GAME_SPECS if sp.key == state.get("game")), None)
+        if spec is None:
+            await self._retire(origin, keep_cards=True)
+            return False
+        loser_side = str(state.get("turn") or "")
+        loser_mark = {"R": spec.host_mark, "B": spec.guest_mark}.get(loser_side, "")
+        if state.get("game") in (ach.SPEC.key,):
+            loser_name = {"R": "红方", "B": "蓝方"}.get(loser_side, "轮到的一方")
+        else:
+            loser_name = {"R": "先手", "B": "后手"}.get(loser_side, "轮到的一方")
+        labels = state.get("labels") or {}
+        who = labels.get(loser_side) or ""
+        who_text = f"{loser_name} {who}".strip()
+        minutes = max(1, round(self.move_timeout / 60))
+        text = (f"⏱️ {spec.title}：{who_text}{('（' + loser_mark + '）') if loser_mark else ''}"
+                f" 超过 {minutes} 分钟没有走棋，判**认输**。"
+                f"这一局到此为止，可以随时开新的一局。")
+
+        # 先把对局收掉，再发消息：消息发失败也不能让对局赖在注册表里。
+        await self._retire(origin, keep_cards=True)
+        await self._announce(origin, text)
+        logger.info("[Games] %s 超时判负：origin=%s side=%s", spec.title, origin, loser_side)
+        return True
+
+    async def _announce(self, origin: str, text: str) -> bool:
+        """在本群发一条普通文本消息（主动消息）。
+
+        失败只记日志：QQ 官方对主动消息有频控和"用户可关闭"的设置，这是平台
+        限制而不是插件故障，绝不能因此回滚已经做出的判决。
+        """
+        if MessageChain is None:
+            logger.warning("[Games] 当前 AstrBot 没有 MessageChain，超时提示只能写日志：%s", text)
+            return False
+        try:
+            await self.context.send_message(origin, MessageChain().message(text))
+            return True
+        except Exception as exc:      # noqa: BLE001
+            logger.warning("[Games] 超时提示发送失败：origin=%s error=%s", origin, exc)
+            return False
 
     # --- Hub plumbing -------------------------------------------------------
 
@@ -223,6 +371,14 @@ class TicTacToePlugin(Star):
             ("hornchess.quit", "牛角棋结束对局", "结束当前群的牛角棋对局。",
              self._act_quit),
         ]
+        # 规则按钮：只要 GameSpec 声明了 rules 就有，新增游戏免改这里。
+        for spec in GAME_SPECS:
+            if not spec.rules:
+                continue
+            specs.append((f"{spec.key}.rules", f"{spec.title}：规则速查",
+                          f"把{spec.title}的规则推到群里。", self._act_show_rules))
+            specs.append((f"{spec.key}.rules_ack", f"{spec.title}：规则卡关闭",
+                          "规则卡片上的「知道了」，只收卡片。", self._act_rules_ack))
         for action_id, title, description, callback in specs:
             hub.actions.register(ActionSpec(
                 action_id=action_id,
@@ -485,6 +641,24 @@ class TicTacToePlugin(Star):
         if self._matches.get(context.origin) is None:
             return 3
         await self._retire(context.origin)
+        return 0
+
+    async def _act_show_rules(self, context, params) -> int:
+        """规则按钮：发一张独立的规则卡，不动任何对局状态。
+
+        不塞进大厅卡的原因：大厅卡的按钮位是给"开始游戏"用的，规则是看完
+        就走的资料；而且独立卡片能自己过期，不会把大厅卡挤到下一屏。
+        """
+        key = str((params or {}).get("spec") or "")
+        spec = next((sp for sp in GAME_SPECS if sp.key == key), None)
+        if spec is None or not spec.rules:
+            return 1
+        await self._send_card(context, lobby.build_rules_card(spec),
+                              session_id=self._ui_session(context.origin, spec))
+        return 0
+
+    async def _act_rules_ack(self, context, params) -> int:
+        """规则卡上的「知道了」：什么都不改，只让 Hub 收掉这张卡。"""
         return 0
 
     async def _act_restart(self, context, params) -> int:

@@ -45,6 +45,8 @@ if "astrbot" not in sys.modules:
 
     _event = types.ModuleType("astrbot.api.event")
     _event.AstrMessageEvent = object
+    # 生产代码用 MessageChain 发主动消息（超时判负播报）；桩里给个最小实现。
+    _event.MessageChain = lambda *a, **k: SimpleNamespace(chain=[])
     _event.filter = _Anything()
     _star = types.ModuleType("astrbot.api.star")
     _star.Context = object

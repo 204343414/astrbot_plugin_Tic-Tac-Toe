@@ -448,7 +448,7 @@ def test_animalchess_inherits_the_shared_five_button_lobby():
     card = ac.build_lobby_card()
     assert card == lobby.build_lobby_card(ac.SPEC)
     labels = [b["label"] for row in card["rows"] for b in row]
-    assert labels == ["🤖 人机对战", "👥 群友对战", "轻松", "✅ 普通", "困难"]
+    assert labels == ["🤖 人机对战", "👥 群友对战", "轻松", "✅ 普通", "困难", "📖 规则"]
     for row in card["rows"]:
         for button in row:
             assert button["action_id"].startswith("animalchess.")
@@ -460,7 +460,9 @@ def test_every_animalchess_action_is_registered():
     waiting = lobby.build_waiting_card(ac.SPEC, "小明", "U1")
     for row in card["rows"] + waiting["rows"]:
         for button in row:
-            assert f'"{button["action_id"]}"' in source
+            literal = f'"{button["action_id"]}"'
+            dynamic = f'f"{{spec.key}}.{button["action_id"].split(".", 1)[1]}"' in source
+            assert literal in source or dynamic
     assert '"animalchess.lobby"' in source
 
 

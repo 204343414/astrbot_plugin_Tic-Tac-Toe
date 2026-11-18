@@ -41,6 +41,8 @@ if "astrbot" not in sys.modules:
     _api.AstrBotConfig = dict
     _event = types.ModuleType("astrbot.api.event")
     _event.AstrMessageEvent = object
+    # 生产代码用 MessageChain 发主动消息（超时判负播报）；桩里给个最小实现。
+    _event.MessageChain = lambda *a, **k: SimpleNamespace(chain=[])
     _event.filter = _Anything()
     _star = types.ModuleType("astrbot.api.star")
     _star.Context = object
@@ -148,15 +150,16 @@ def context(openid=HOST):
 def test_the_entry_card_asks_for_a_side_first():
     card = lobby.build_lobby_card(hc.SPEC, "normal")
     labels = [b["label"] for row in card["rows"] for b in row]
-    assert len(labels) == 2
+    # 两个选边按钮 + （有规则时）一个「📖 规则」
+    side_buttons = [b for row in card["rows"] for b in row
+                    if b["action_id"] == lobby.action_id(hc.SPEC, "pick_side")]
+    assert len(side_buttons) == 2
     assert any("牛" in label for label in labels)
     assert any("人" in label for label in labels)
     # 第一步不许出现人机／群友
     assert not any("人机" in label or "群友" in label for label in labels)
-    for row in card["rows"]:
-        for button in row:
-            assert button["action_id"] == lobby.action_id(hc.SPEC, "pick_side")
-            assert button["params"]["side"] in (hc.HUMANS, hc.BULL)
+    for button in side_buttons:
+        assert button["params"]["side"] in (hc.HUMANS, hc.BULL)
 
 
 @pytest.mark.parametrize("side", [hc.BULL, hc.HUMANS])
