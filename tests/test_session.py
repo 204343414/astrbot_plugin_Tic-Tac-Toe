@@ -163,8 +163,12 @@ def test_config_exposes_only_the_shared_timeout():
         Path(__file__).resolve().parents[1].joinpath("_conf_schema.json")
         .read_text("utf-8")
     )
-    assert list(schema) == ["idle_timeout_seconds"], "配置应只保留通用项"
+    # 配置里只应该有"所有棋种通用"的项，不许塞某个棋的专属开关。
+    assert set(schema) == {"idle_timeout_seconds", "move_timeout_seconds"}, \
+        "配置应只保留通用项"
     assert schema["idle_timeout_seconds"]["default"] == 90
+    assert schema["move_timeout_seconds"]["default"] == 180, "挂机判负默认 180 秒"
+    assert "0 = 关闭" in (schema["move_timeout_seconds"].get("hint") or ""), "0 = 关闭，要写在提示里"
 
 
 # --- a failed upload must not lose the move ---------------------------------
