@@ -288,3 +288,80 @@ def test_rule_actions_are_registered_for_each_game():
     source = Path(__file__).resolve().parents[1].joinpath("main.py").read_text("utf-8")
     assert 'f"{spec.key}.rules"' in source
     assert 'f"{spec.key}.rules_ack"' in source
+
+
+# ---------------------------------------------------------------- 文案 ↔ 实现
+#
+# 这一组是补上"规则文案写反了没人发现"的窟窿：斗兽棋的规则卡一度写着
+# "鼠能从不里吃岸上的象"，而代码和 README 都是"水陆不能互吃"。玩家先发现，
+# 测试才发现——顺序反了。下面每条都现场跑一遍规则引擎，再断言文案说的是同一件事。
+
+def _board(mode=ach.MODE_AI, players=None):
+    state = ach.new_state(mode, "h")
+    state["pieces"] = {}
+    state["phase"] = ach.PHASE_PLAYING
+    state["players"] = players or {ach.RED: "h", ach.BLUE: ""}
+    return state
+
+
+def _put(state, row, col, side, animal):
+    state["pieces"][(row, col)] = (side, animal)
+
+
+def test_rules_text_matches_water_land_isolation():
+    """水陆之间不能互吃 —— 文案与实现必须一致。"""
+    state = _board()
+    _put(state, 2, 3, ach.RED, ach.RAT)        # 水里
+    _put(state, 3, 3, ach.BLUE, ach.ELEPHANT)  # 岸上
+    state["turn"] = ach.RED
+    assert ach.apply_move(state, ach.RAT, "下", "h") == "水陆之间不能互吃"
+    assert ach.find_piece(state, ach.BLUE, ach.ELEPHANT) == (3, 3)
+    rules = ach.SPEC.rules
+    assert "水陆之间不能互吃" in rules
+    assert "水里的鼠也吃不到岸上的象" in rules
+    assert "也能从水里吃岸上的象" not in rules, "这句是写反的旧文案"
+
+
+def test_rules_text_matches_rat_eats_elephant_on_land():
+    state = _board()
+    _put(state, 0, 0, ach.RED, ach.RAT)
+    _put(state, 0, 1, ach.BLUE, ach.ELEPHANT)
+    state["turn"] = ach.RED
+    assert ach.apply_move(state, ach.RAT, "右", "h") == ""
+    assert ach.find_piece(state, ach.BLUE, ach.ELEPHANT) is None
+    assert "鼠能吃象" in ach.SPEC.rules
+
+
+def test_rules_text_matches_lossless_capture():
+    """同级互吃是"只吃对方"，不会双方同归于尽。"""
+    for mode, direction, side, other, actor in (
+        (ach.MODE_AI, "右", ach.RED, ach.BLUE, "h"),
+        (ach.MODE_PVP, "左", ach.BLUE, ach.RED, "g"),
+    ):
+        state = _board(mode, {ach.RED: "h", ach.BLUE: "g" if mode == ach.MODE_PVP else ""})
+        _put(state, 0, 0, ach.RED, ach.LEOPARD)
+        _put(state, 0, 1, ach.BLUE, ach.LEOPARD)
+        state["turn"] = side
+        assert ach.apply_move(state, ach.LEOPARD, direction, actor) == ""
+        assert ach.find_piece(state, side, ach.LEOPARD) is not None, "攻方必须留在场上"
+        assert ach.find_piece(state, other, ach.LEOPARD) is None, "守方被吃"
+    assert "不会双方同归于尽" in ach.SPEC.rules
+
+
+def test_rules_text_matches_every_game_ending():
+    """和棋/胜负的写法要和模块里的常量、判定一致。"""
+    # 牛角棋：步数用完判和（不是判牛赢）
+    assert hn.PLY_LIMIT == 60
+    assert "60 手走完还没困住牛判和" in hn.SPEC.rules
+    assert "步数用完仍没围住 → 牛赢" not in hn.SPEC.rules, "旧文案把和棋说成了牛赢"
+    # 五子棋：长连也算胜（winning_line 滑动到 WIN_LENGTH 就返回）
+    board = ["" for _ in range(gk.SIZE * gk.SIZE)]
+    for col in range(3, 9):                  # 六连
+        board[gk.index_of(7, col)] = "B"
+    assert gk.winner(board) == "B"
+    assert "连成五子即胜" in gk.SPEC.rules
+    # 国际象棋的三种和棋都在实现里出现了
+    src = Path(__file__).resolve().parents[1].joinpath("games/chess.py").read_text("utf-8")
+    for key in ("stalemate", "fifty", "insufficient_material"):
+        assert key in src
+    assert "三次重复" in ch.SPEC.rules
